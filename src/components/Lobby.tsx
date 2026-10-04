@@ -1,0 +1,354 @@
+"use client";
+import { useEffect, useState } from "react";
+import { Avatar, AvatarPicker, uploadAvatar } from "./Avatar";
+import { Cobwebs } from "./Cobwebs";
+import { HoldButton } from "./HoldButton";
+import { PhoneSetup } from "./PhoneSetup";
+import { PumpkinCat } from "./PumpkinCat";
+import type { GameState, Role } from "./types";
+import { post } from "./util";
+
+type Toast = (text: string, bad?: boolean) => void;
+
+const ROLE_LABEL: Record<Role, string> = { HUNTER: "Cercatore", FUGITIVE: "Fuggiasco" };
+
+export function RolePicker({ value, onChange, disabled, big }: { value: Role | null; onChange: (r: Role) => void; disabled?: boolean; big?: boolean }) {
+  return (
+    <div className={`seg accent ${big ? "big" : ""}`} role="radiogroup" aria-label="Ruolo">
+      {(["HUNTER", "FUGITIVE"] as const).map((r) => (
+        <button type="button" key={r} role="radio" aria-checked={value === r} className={value === r ? "on" : ""} disabled={disabled} onClick={() => onChange(r)}>
+          {ROLE_LABEL[r]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const ZONE_OPTIONS = [
+  { key: "cirenaica", name: "Cirenaica", desc: "Tra Via Massarenti e la ferrovia: Piazzetta degli Umarells, Via Paolo Fabbri 43, Teatro Dehon." },
+  { key: "sandonato", name: "San Donato", desc: "Dalla ferrovia alla Fiera: Mercato San Donato, Le 8 province, Villaggio dei Ferrovieri." },
+] as const;
+
+export function Join({ onDone }: { onDone: () => void }) {
+  const [mode, setMode] = useState<"create" | "join" | "code">("join");
+  const [gameCode, setGameCode] = useState("");
+  const [zone, setZone] = useState<"cirenaica" | "sandonato">("cirenaica");
+  const [found, setFound] = useState<{ zoneName: string; players: number; phase: string } | null>(null);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState<Role | null>(null);
+  const [code, setCode] = useState("");
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // A shared link (…/?p=ABCDE) opens straight on "Entra" with the game code filled in.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search).get("p");
+    const t = setTimeout(() => {
+      if (p) {
+        setMode("join");
+        setGameCode(p.toUpperCase().slice(0, 5));
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Look the game up as soon as the code is complete, so you know where you're joining.
+  useEffect(() => {
+    if (mode !== "join" || gameCode.length !== 5) {
+      const t = setTimeout(() => setFound(null), 0);
+      return () => clearTimeout(t);
+    }
+    let alive = true;
+    fetch(`/api/game?code=${gameCode}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        if (d.error) { setFound(null); setErr(d.error); } else { setFound(d); setErr(null); }
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [mode, gameCode]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      const body =
+        mode === "create" ? { action: "create", zone, name, role }
+        : mode === "join" ? { action: "join", gameCode, name, role }
+        : { action: "rejoin", code };
+      await post("/api/lobby", body);
+      if (mode !== "code" && photo) await uploadAvatar(photo).catch(() => {});
+      if (window.location.search) window.history.replaceState(null, "", "/");
+      onDone();
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const who = (
+    <>
+      <label className="joinphoto">
+        <span className="avpick">
+          {preview ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img className="av" src={preview} alt="" style={{ width: 64, height: 64 }} />
+          ) : (
+            <span className={`av av-${role === "HUNTER" ? "hunter" : "fugitive"}`} style={{ width: 64, height: 64, fontSize: 26 }}>{name.trim().slice(0, 1).toUpperCase() || "?"}</span>
+          )}
+          <span className="avpick-badge" aria-hidden="true">+</span>
+        </span>
+        <span className="small muted">{photo ? "Foto scelta. Tocca per cambiarla." : "Aggiungi una foto profilo (facoltativa)"}</span>
+        <input
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            setPhoto(f);
+            setPreview(URL.createObjectURL(f));
+          }}
+        />
+      </label>
+      <label className="field">
+        <span className="lbl">Il tuo nome</span>
+        <input id="join-name" className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={20} autoComplete="nickname" placeholder="Mara" />
+      </label>
+      <div className="field">
+        <span className="lbl">Ruolo</span>
+        <RolePicker value={role} onChange={setRole} big />
+        <span className="muted small">Le coppie dei fuggiaschi si estraggono a sorte in lobby.</span>
+      </div>
+    </>
+  );
+
+  return (
+    <form className="login" onSubmit={submit}>
+      <Cobwebs />
+      <div className="lbl brand">Halloween · Bologna</div>
+      <div className="hero">
+        <h1>Night<br /><span>Hunt</span></h1>
+        <PumpkinCat />
+      </div>
+      <div className="sheet glass">
+        <div className="seg">
+          <button type="button" className={mode === "join" ? "on" : ""} onClick={() => { setMode("join"); setErr(null); }}>Entra</button>
+          <button type="button" className={mode === "create" ? "on" : ""} onClick={() => { setMode("create"); setErr(null); }}>Crea</button>
+          <button type="button" className={mode === "code" ? "on" : ""} onClick={() => { setMode("code"); setErr(null); }}>Rientra</button>
+        </div>
+
+        {mode === "join" && (
+          <>
+            <label className="field">
+              <span className="lbl">Codice partita</span>
+              <input id="join-game" className="input pwfield" value={gameCode} onChange={(e) => setGameCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5))} autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="K7M2Q" />
+            </label>
+            {found ? (
+              <div className="notice">Partita a {found.zoneName} · {found.players} {found.players === 1 ? "giocatore" : "giocatori"}{found.phase === "LOBBY" ? " · in lobby" : found.phase === "ENDED" ? " · appena finita" : " · in corso"}</div>
+            ) : (
+              <span className="muted small">Chiedi le 5 lettere a chi ha creato la partita, o apri il link che ti ha mandato.</span>
+            )}
+            {who}
+            <button type="submit" className="btn a" disabled={busy || gameCode.length !== 5 || name.trim().length < 2 || !role}>{busy ? "Entro…" : "Entra in partita"}</button>
+          </>
+        )}
+
+        {mode === "create" && (
+          <>
+            <div className="field">
+              <span className="lbl">Zona di gioco</span>
+              <div className="zones">
+                {ZONE_OPTIONS.map((z) => (
+                  <button type="button" key={z.key} className={`zonecard ${zone === z.key ? "on" : ""}`} onClick={() => setZone(z.key)} aria-pressed={zone === z.key}>
+                    <b>{z.name}</b>
+                    <span>{z.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {who}
+            <button type="submit" className="btn a" disabled={busy || name.trim().length < 2 || !role}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
+            <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice con il tuo gruppo.</span>
+          </>
+        )}
+
+        {mode === "code" && (
+          <>
+            <label className="field">
+              <span className="lbl">Il tuo codice di rientro</span>
+              <input id="join-code" className="input pwfield" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} maxLength={4} autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="AB3K" />
+            </label>
+            <span className="muted small">Sono le 4 lettere che trovi in lobby e nell&apos;HUD. Servono se cambi telefono o chiudi il browser.</span>
+            <button type="submit" className="btn a" disabled={busy || code.trim().length !== 4}>{busy ? "Entro…" : "Rientra"}</button>
+          </>
+        )}
+        {err && <div className="notice" style={{ background: "var(--threat-soft)", color: "#ff5a62" }}>{err}</div>}
+      </div>
+    </form>
+  );
+}
+
+/** Game code with a share button: the link opens the join screen with the code already filled in. */
+export function ShareGame({ code, zoneName, toast }: { code: string; zoneName: string; toast: Toast }) {
+  const share = async () => {
+    const url = `${window.location.origin}/?p=${code}`;
+    const text = `Night Hunt a ${zoneName}: entra con il codice ${code}`;
+    try {
+      if (navigator.share) await navigator.share({ title: "Night Hunt", text, url });
+      else {
+        await navigator.clipboard.writeText(`${text} ${url}`);
+        toast("Link copiato: incollalo nel gruppo.");
+      }
+    } catch {
+      // share sheet closed: nothing to do
+    }
+  };
+  return (
+    <div className="box a gamecode">
+      <div>
+        <span className="lbl">Codice partita</span>
+        <span className="code big-code">{code}</span>
+      </div>
+      <button type="button" className="btn a sm" onClick={share}>Condividi</button>
+    </div>
+  );
+}
+
+export function Lobby({ s, refresh, toast }: { s: GameState; refresh: () => void; toast: Toast }) {
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const players = s.lobby.players;
+  const hunters = players.filter((p) => p.role === "HUNTER");
+  const fugitives = players.filter((p) => p.role === "FUGITIVE");
+  const canDraw = hunters.length >= 1 && fugitives.length >= 2 && fugitives.length % 2 === 0;
+  const myPair = s.lobby.pairs.find((p) => p.id === s.me.pairId);
+  const isHost = s.game.hostId === s.me.id;
+  const canLead = isHost || s.game.hostStale;
+
+  const act = async (body: Record<string, unknown>, ok?: string) => {
+    setBusy(true);
+    try {
+      await post("/api/lobby", body);
+      if (ok) toast(ok);
+      refresh();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const row = (p: (typeof players)[number]) => {
+    const me = p.id === s.me.id;
+    const host = p.id === s.game.hostId;
+    return (
+      <div key={p.id} className="cell">
+        <span className="row" style={{ gap: 10, justifyContent: "flex-start", minWidth: 0 }}>
+          <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={34} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
+          <span style={{ fontWeight: me ? 600 : 400, color: me ? "var(--accent)" : undefined }}>{p.name}{me ? " (tu)" : ""}</span>
+          {host && <span className="chip a">Organizzatore</span>}
+        </span>
+        {confirm === p.id ? (
+          <span className="row" style={{ gap: 6 }}>
+            <button type="button" className="chip r" onClick={() => { setConfirm(null); act({ action: "remove", playerId: p.id }, me ? "Sei uscito dalla lobby." : `${p.name} tolto dalla lobby.`); }}>{me ? "Esci" : "Togli"}</button>
+            <button type="button" className="chip" onClick={() => setConfirm(null)}>Annulla</button>
+          </span>
+        ) : confirm === `host:${p.id}` ? (
+          <span className="row" style={{ gap: 6 }}>
+            <button type="button" className="chip a" onClick={() => { setConfirm(null); act({ action: "makeHost", playerId: p.id }, `${p.name} ora è l'organizzatore.`); }}>Conferma</button>
+            <button type="button" className="chip" onClick={() => setConfirm(null)}>Annulla</button>
+          </span>
+        ) : me ? (
+          <button type="button" className="chip" onClick={() => setConfirm(p.id)}>Esci</button>
+        ) : isHost ? (
+          <span className="row" style={{ gap: 6 }}>
+            <button type="button" className="chip" onClick={() => setConfirm(`host:${p.id}`)} aria-label={`Rendi ${p.name} organizzatore`}>Passa</button>
+            <button type="button" className="chip" onClick={() => setConfirm(p.id)} aria-label={`Togli ${p.name}`}>Togli</button>
+          </span>
+        ) : null}
+      </div>
+    );
+  };
+
+  const list = (title: string, ps: typeof players, target: number) => (
+    <section className="field">
+      <div className="row"><span className="lbl">{title}</span><span className={`chip ${ps.length === target ? "a" : ""}`}>{ps.length} di {target}</span></div>
+      <div className="box" style={{ gap: 0, paddingBlock: 2 }}>
+        {ps.length === 0 && <span className="muted small cell">Ancora nessuno.</span>}
+        {ps.map(row)}
+      </div>
+    </section>
+  );
+
+  return (
+    <div className="pad">
+      <div>
+        <div className="lbl">{s.game.zoneName} · lobby · round {s.game.round}</div>
+        <div className="largetitle">{s.game.drawn ? "Coppie estratte" : "Chi gioca stasera?"}</div>
+      </div>
+
+      <ShareGame code={s.game.code} zoneName={s.game.zoneName} toast={toast} />
+
+      <PhoneSetup toast={toast} />
+
+      <div className="box">
+        <div className="row">
+          <span className="row" style={{ gap: 12, justifyContent: "flex-start" }}>
+            <AvatarPicker id={s.me.id} name={s.me.name} at={s.avatars[s.me.id]} size={48} kind={s.me.role === "HUNTER" ? "hunter" : "fugitive"} onDone={() => { toast("Foto profilo aggiornata."); refresh(); }} onError={(m) => toast(m, true)} />
+            <span className="lbl">Il tuo ruolo</span>
+          </span>
+          <span className="small muted">rientro <span className="code">{s.me.rejoinCode}</span></span>
+        </div>
+        <RolePicker value={s.me.role} disabled={busy} onChange={(r) => s.me.role !== r && act({ action: "role", role: r })} />
+      </div>
+
+      {list("Cercatori", hunters, 2)}
+      {list("Fuggiaschi", fugitives, 8)}
+
+      {s.game.drawn && (
+        <>
+          <div className="stack-pairs">
+            {s.lobby.pairs.map((p, i) => (
+              <div key={p.id} className={`box reveal ${p.id === s.me.pairId ? "a" : ""}`} style={{ animationDelay: `${i * 0.25}s` }}>
+                <span className="lbl">Coppia {i + 1}</span>
+                <span className="title">{p.name}</span>
+                <span className="muted">{p.members.join("  +  ")}</span>
+              </div>
+            ))}
+          </div>
+          {myPair && <div className="notice">Sei in coppia con {myPair.members.find((n) => n !== s.me.name)} · {myPair.name}</div>}
+        </>
+      )}
+
+      {canLead ? (
+        <>
+          {!isHost && <div className="notice">{s.game.hostName ?? "L'organizzatore"} non apre l&apos;app da qualche minuto: puoi guidare tu la partita.</div>}
+          {s.game.drawn ? (
+            <>
+              <HoldButton label={busy ? "Avvio…" : "Tieni premuto per avviare"} disabled={busy} ms={1500} onFire={() => act({ action: "start" })} />
+              <button type="button" className="btn ghost" disabled={busy || !canDraw} onClick={() => act({ action: "draw" }, "Nuova estrazione fatta.")}>Rifai l&apos;estrazione</button>
+              <p className="muted small">Al via: {s.game.headStartMin} minuti di vantaggio ai fuggiaschi, poi {s.game.liveMin} minuti di caccia.</p>
+            </>
+          ) : (
+            <>
+              <HoldButton label={busy ? "Estraggo…" : "Tieni premuto per estrarre le coppie"} disabled={!canDraw || busy} onFire={() => act({ action: "draw" })} />
+              <p className="muted small">
+                {canDraw ? "Sei l'organizzatore: estrai quando ci sono tutti. Se qualcuno entra o cambia ruolo dopo, si rifà." : "Servono almeno 1 cercatore e un numero pari di fuggiaschi (in 10: consigliati 2 cercatori e 8 fuggiaschi)."}
+              </p>
+            </>
+          )}
+        </>
+      ) : (
+        <div className="notice">
+          {s.game.drawn ? `Aspetta che ${s.game.hostName} avvii la partita.` : `Aspetta che ${s.game.hostName} estragga le coppie.`}
+        </div>
+      )}
+    </div>
+  );
+}

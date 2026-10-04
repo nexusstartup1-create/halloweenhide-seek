@@ -1,3 +1,5 @@
+.vercel
+.env*
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
@@ -39,3 +41,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# copied from node_modules at build time
+/public/maplibre
+/public/lottie
+
+# Local originals, previews and screenshots (not part of the app)
+/*.png
+/*.gif
+/*.jpg
+/*.lottie
+/*.jar

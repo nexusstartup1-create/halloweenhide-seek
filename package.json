@@ -6,17 +6,28 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:setup": "node --env-file=.env.local scripts/setup.mjs",
+    "copy:maplibre": "mkdir -p public/maplibre public/lottie && cp node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs public/maplibre/ && cp node_modules/@lottiefiles/dotlottie-web/dist/dotlottie-player.wasm public/lottie/",
+    "postinstall": "npm run copy:maplibre",
+    "prebuild": "npm run copy:maplibre"
   },
   "dependencies": {
+    "@lottiefiles/dotlottie-react": "^0.19.16",
+    "@vercel/blob": "^2.8.0",
+    "maplibre-gl": "^6.11.2",
     "next": "16.3.8",
+    "pg": "^8.23.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
     "typescript": "^5"
