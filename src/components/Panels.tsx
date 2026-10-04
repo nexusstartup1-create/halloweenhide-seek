@@ -1,0 +1,222 @@
+"use client";
+import { useState } from "react";
+import { Avatar } from "./Avatar";
+import { HoldButton } from "./HoldButton";
+import { ShareGame } from "./Lobby";
+import type { GameState } from "./types";
+import { ago, clock, post, pts } from "./util";
+
+type Toast = (text: string, bad?: boolean) => void;
+
+/** Bottom sheet with a dimmed, blurred backdrop. Tap outside to close. */
+export function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="sheetwrap" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="bsheet glass">
+        <div className="row">
+          <span className="title">{title}</span>
+          <button type="button" className="iconbtn" onClick={onClose} aria-label="Chiudi">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button type="button" className="cell toggle" role="switch" aria-checked={on} onClick={() => onChange(!on)}>
+      <span>{label}</span>
+      <span className={`switch ${on ? "on" : ""}`}><i /></span>
+    </button>
+  );
+}
+
+export function SettingsSheet({ onClose, sound, setSound, vibe, setVibe, glassClear, setGlassClear, isHost, openHost, openRules }: {
+  onClose: () => void;
+  sound: boolean; setSound: (v: boolean) => void;
+  vibe: boolean; setVibe: (v: boolean) => void;
+  glassClear: boolean; setGlassClear: (v: boolean) => void;
+  isHost: boolean; openHost: () => void; openRules: () => void;
+}) {
+  return (
+    <Sheet title="Impostazioni" onClose={onClose}>
+      <div className="box" style={{ gap: 0, paddingBlock: 2 }}>
+        <Toggle label="Suoni" on={sound} onChange={setSound} />
+        <Toggle label="Vibrazione" on={vibe} onChange={setVibe} />
+        <Toggle label="Vetro trasparente" on={glassClear} onChange={setGlassClear} />
+      </div>
+      <button type="button" className="btn" onClick={openRules}>Regole del gioco</button>
+      {isHost && <button type="button" className="btn a" onClick={openHost}>Pannello organizzatore</button>}
+    </Sheet>
+  );
+}
+
+const PHASE_LABEL: Record<string, string> = { LOBBY: "In lobby", HEAD_START: "Vantaggio fuggiaschi", LIVE: "Caccia aperta", PAUSED: "In pausa", ENDED: "Finita" };
+
+function Choice<T extends string | number>({ label, value, options, render, disabled, onPick }: {
+  label: string; value: T; options: T[]; render: (v: T) => string; disabled: boolean; onPick: (v: T) => void;
+}) {
+  return (
+    <div className="field">
+      <span className="lbl">{label}</span>
+      <div className="seg">
+        {options.map((o) => (
+          <button type="button" key={String(o)} className={o === value ? "on" : ""} disabled={disabled} onClick={() => o !== value && onPick(o)}>{render(o)}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function HostPanel({ s, now, refresh, toast, onClose }: { s: GameState; now: number; refresh: () => void; toast: Toast; onClose: () => void }) {
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const g = s.game;
+  const running = g.phase === "HEAD_START" || g.phase === "LIVE" || g.phase === "PAUSED";
+  const lobby = g.phase === "LOBBY";
+
+  const act = async (body: Record<string, unknown>, ok?: string) => {
+    setBusy(true);
+    try {
+      await post("/api/lobby", body);
+      if (ok) toast(ok);
+      refresh();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet title="Organizzatore" onClose={onClose}>
+      <ShareGame code={g.code} zoneName={g.zoneName} toast={toast} />
+
+      <section className="field">
+        <div className="row"><span className="lbl">Partita</span><span className={`chip ${g.phase === "PAUSED" ? "fr" : running ? "a" : ""}`}>{PHASE_LABEL[g.phase]}</span></div>
+        {running && g.phase !== "PAUSED" && g.endsAt && <span className="muted small">Fine tra {clock(+new Date(g.endsAt) - now)}</span>}
+        {(g.phase === "HEAD_START" || g.phase === "LIVE") && (
+          <button type="button" className="btn" disabled={busy} onClick={() => act({ action: "pause" }, "Partita in pausa.")}>Metti in pausa</button>
+        )}
+        {g.phase === "PAUSED" && (
+          <button type="button" className="btn a" disabled={busy} onClick={() => act({ action: "resume" }, "Si riparte!")}>Riprendi la partita</button>
+        )}
+        {running && (
+          <div className="dangerhold">
+            <HoldButton label="Tieni premuto per terminare la partita" ms={2000} disabled={busy} onFire={() => act({ action: "terminate" }, "Partita terminata.")} />
+          </div>
+        )}
+      </section>
+
+      <section className="field">
+        <span className="lbl">Impostazioni {lobby ? "" : "(si cambiano in lobby)"}</span>
+        <Choice label="Missioni" value={g.missionsMode} options={["chill", "abbandonati"] as ("chill" | "abbandonati")[]} render={(v) => (v === "chill" ? "Chill" : "Posti abbandonati")} disabled={!lobby || busy} onPick={(v) => act({ action: "settings", missionsMode: v })} />
+        <Choice label="Durata della caccia" value={g.liveMin} options={g.options.live} render={(v) => `${v}′`} disabled={!lobby || busy} onPick={(v) => act({ action: "settings", liveMin: v })} />
+        <Choice label="Vantaggio iniziale" value={g.headStartMin} options={g.options.headStart} render={(v) => `${v}′`} disabled={!lobby || busy} onPick={(v) => act({ action: "settings", headStartMin: v })} />
+        <Choice label="Cerchio dei fuggiaschi" value={g.zoneRadiusM} options={g.options.radius} render={(v) => `${v} m`} disabled={!lobby || busy} onPick={(v) => act({ action: "settings", zoneRadiusM: v })} />
+      </section>
+
+      <section className="field">
+        <span className="lbl">Giocatori e codici di rientro</span>
+        <div className="box" style={{ gap: 0, paddingBlock: 2 }}>
+          {(s.hostView ?? []).map((p) => (
+            <div key={p.id} className="cell" style={{ alignItems: "flex-start" }}>
+              <span className="row" style={{ gap: 10, justifyContent: "flex-start", minWidth: 0 }}>
+                <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={32} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
+                <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                  <b style={{ fontSize: 15 }}>{p.name}{p.id === s.me.id ? " (tu)" : ""}</b>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {p.role === "HUNTER" ? "Cercatore" : "Fuggiasco"}{p.spectator ? " · spettatore" : p.status === "CAPTURED" ? " · fantasma" : ""}
+                    {p.lastSeen ? ` · visto ${ago(now - +new Date(p.lastSeen))}` : ""}
+                  </span>
+                </span>
+              </span>
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                <span className="code">{p.rejoinCode}</span>
+                {p.id !== s.me.id && (
+                  confirm === p.id ? (
+                    <span className="row" style={{ gap: 6 }}>
+                      <button type="button" className="chip r" onClick={() => { setConfirm(null); act({ action: "remove", playerId: p.id }, `${p.name} espulso.`); }}>Espelli</button>
+                      <button type="button" className="chip" onClick={() => setConfirm(null)}>No</button>
+                    </span>
+                  ) : confirm === `host:${p.id}` ? (
+                    <span className="row" style={{ gap: 6 }}>
+                      <button type="button" className="chip a" onClick={() => { setConfirm(null); act({ action: "makeHost", playerId: p.id }, `${p.name} ora è l'organizzatore.`); onClose(); }}>Conferma</button>
+                      <button type="button" className="chip" onClick={() => setConfirm(null)}>No</button>
+                    </span>
+                  ) : (
+                    <span className="row" style={{ gap: 6 }}>
+                      <button type="button" className="chip" onClick={() => setConfirm(`host:${p.id}`)}>Passa</button>
+                      <button type="button" className="chip" onClick={() => setConfirm(p.id)}>Espelli</button>
+                    </span>
+                  )
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+        <span className="muted small">Se qualcuno esce, dagli il suo codice: tocca &quot;Rientra&quot; e lo inserisce.</span>
+      </section>
+    </Sheet>
+  );
+}
+
+export function RulesSheet({ s, onClose }: { s: GameState; onClose: () => void }) {
+  const g = s.game;
+  return (
+    <Sheet title="Regole del gioco" onClose={onClose}>
+      <div className="rules">
+        <h4>Le squadre</h4>
+        <p><b>Cercatori</b> da soli contro <b>fuggiaschi</b> in coppie estratte a sorte. Ogni coppia parte con 1.500 punti.</p>
+        <h4>La partita</h4>
+        <p>{g.headStartMin} minuti di vantaggio ai fuggiaschi, poi {g.liveMin} minuti di caccia a {g.zoneName}. Restate dentro il confine arancione sulla mappa.</p>
+        <h4>Fuggiaschi</h4>
+        <p>Fate le missioni ({g.missionsMode === "abbandonati" ? "posti abbandonati" : "chill"}): una foto o un video sul posto, entro 40 m. Ogni 20 minuti una <b>missione lampo</b> vale doppio. I cercatori vedono la vostra zona come un cerchio di {g.zoneRadiusM} m.</p>
+        <h4>Cercatori</h4>
+        <p>Toccate un fuggiasco: vi dice la password e la scrivete in <b>Cattura</b>. Rubate metà dei punti della sua coppia (tutti, se è l&apos;ultimo) più {g.captureBounty} di taglia.</p>
+        <h4>Carte</h4>
+        <p>Ghost Shield (immunità), Nebbia (sparite dalla mappa), Eco (cerchio finto) per i fuggiaschi; Radar Ping e Traccia per i cercatori. Gli effetti durano 5 minuti.</p>
+        <h4>Fantasmi</h4>
+        <p>Chi viene catturato passa con i cercatori e può usare il <b>Sussurro</b> per rivelare il settore di un fuggiasco.</p>
+        <h4>Chi vince</h4>
+        <p>Se sono tutti presi vince il cercatore con più punti. Altrimenti, allo scadere, vince la coppia ancora in gioco con più punti.</p>
+        <h4>Sicurezza</h4>
+        <p>Si gioca di notte in strada: attenzione al traffico, niente corse in carreggiata, rispetto per chi abita lì. I luoghi abbandonati al buio possono essere pericolosi e spesso sono proprietà privata.</p>
+      </div>
+    </Sheet>
+  );
+}
+
+/** What a late joiner sees while a game runs: clock, scores and the "Tutti" chat. */
+export function SpectatorView({ s, now }: { s: GameState; now: number }) {
+  const g = s.game;
+  const r = s.results;
+  return (
+    <div className="pad">
+      <div>
+        <div className="lbl">{g.zoneName} · stai guardando</div>
+        <div className="largetitle">Sei spettatore</div>
+      </div>
+      <div className="notice">Sei arrivato a partita iniziata: la segui da qui e giochi dalla prossima.</div>
+      <div>
+        <div className="lbl">{g.phase === "PAUSED" ? "Partita" : g.phase === "HEAD_START" ? "Vantaggio fuggiaschi" : "Tempo rimasto"}</div>
+        <div className="timer">
+          {g.phase === "PAUSED" ? "In pausa" : g.phase === "HEAD_START" ? clock(+new Date(g.liveAt!) - now) : g.endsAt ? clock(+new Date(g.endsAt) - now) : "--:--"}
+        </div>
+      </div>
+      {r && (
+        <div className="cols2">
+          <div className="lb">
+            <span className="lbl">Cercatori</span>
+            {r.hunters.map((h, i) => <div key={h.id}><span>{i + 1}</span><span>{h.name}</span><span>{pts(h.stolen)}</span></div>)}
+          </div>
+          <div className="lb">
+            <span className="lbl">Coppie</span>
+            {r.pairs.map((p, i) => <div key={p.id}><span>{i + 1}</span><span>{p.name}{p.active === 0 ? " ✕" : ` · ${p.active}/2`}</span><span>{pts(p.pool)}</span></div>)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

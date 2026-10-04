@@ -4,3 +4,5 @@ node_modules
 *.lottie
 !public/animations/*.lottie
 /*.png
+/*.gif
+/*.jpg

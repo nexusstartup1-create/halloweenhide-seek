@@ -1,16 +1,21 @@
 import { currentPlayer, startSession } from "@/lib/auth";
 import {
-  claimHost, createGame, drawPairs, findByRejoinCode, GameError, joinGame, makeHost, newRound, removePlayer, setRole, startGame,
+  checkPlayer, claimHost, createGame, drawPairs, findByRejoinCode, GameError, joinGame, makeHost, newRound, pauseGame, removePlayer, resumeGame, setRole, startGame,
+  terminateGame, updateSettings,
 } from "@/lib/game";
 import { body, fail, json } from "@/lib/http";
 
 export async function POST(req: Request) {
   try {
-    const b = await body<{ action: string; name?: string; role?: string; code?: string; gameCode?: string; zone?: string; playerId?: string }>(req);
+    const b = await body<{
+      action: string; name?: string; role?: string; code?: string; gameCode?: string; zone?: string; playerId?: string;
+      liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string;
+    }>(req);
 
     // Creating, joining and rejoining are the only actions without a session.
     if (b.action === "create") {
-      const gameCode = await createGame(String(b.zone ?? ""));
+      checkPlayer(String(b.name ?? ""), String(b.role ?? "")); // before creating, so no empty games are left behind
+      const gameCode = await createGame(String(b.zone ?? ""), String(b.missionsMode ?? "chill"));
       const id = await joinGame(gameCode, String(b.name ?? ""), String(b.role ?? ""));
       await startSession(id);
       return json({ ok: true, gameCode });
@@ -36,6 +41,10 @@ export async function POST(req: Request) {
       case "newRound": await newRound(me); break;
       case "makeHost": await makeHost(me, String(b.playerId)); break;
       case "claimHost": await claimHost(me); break;
+      case "settings": await updateSettings(me, b); break;
+      case "pause": await pauseGame(me); break;
+      case "resume": await resumeGame(me); break;
+      case "terminate": await terminateGame(me); break;
       default: throw new GameError("Azione sconosciuta.");
     }
     return json({ ok: true });

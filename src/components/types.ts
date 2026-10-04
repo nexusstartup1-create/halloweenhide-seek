@@ -1,4 +1,4 @@
-export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "ENDED";
+export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "PAUSED" | "ENDED";
 export type LngLat = [number, number];
 export type CardStateName = "LOCKED" | "READY" | "ACTIVE" | "COOLDOWN" | "SPENT";
 export type Role = "HUNTER" | "FUGITIVE";
@@ -43,17 +43,19 @@ export interface Mission {
 export interface GameState {
   serverNow: number;
   game: {
-    code: string; zone: "cirenaica" | "sandonato"; zoneName: string;
+    code: string; zone: string; zoneName: string;
     round: number; phase: Phase; drawn: boolean; liveAt: string | null; endsAt: string | null;
     boundary: LngLat[]; whatsappUrl: string; winner: { kind: "HUNTER" | "PAIR"; name: string } | null;
-    headStartMin: number; liveMin: number;
+    headStartMin: number; liveMin: number; missionsMode: "chill" | "abbandonati"; pausedAt: string | null;
+    options: { live: number[]; headStart: number[]; radius: number[] };
     hostId: string | null; hostName: string | null; hostStale: boolean; captureBounty: number; zoneRadiusM: number;
   };
-  me: { id: string; name: string; role: Role | null; status: "ACTIVE" | "CAPTURED"; pairId: string | null; rejoinCode: string };
+  me: { id: string; name: string; role: Role | null; status: "ACTIVE" | "CAPTURED"; pairId: string | null; rejoinCode: string; spectator: boolean };
+  hostView: { id: string; name: string; role: Role | null; status: string; spectator: boolean; rejoinCode: string; lastSeen: string | null }[] | null;
   avatars: Record<string, number>;
   typing: { id: string; name: string; channel: Message["channel"]; audio: boolean }[];
   lobby: {
-    players: { id: string; name: string; role: Role | null; pairId: string | null }[];
+    players: { id: string; name: string; role: Role | null; pairId: string | null; spectator: boolean }[];
     pairs: { id: string; name: string; members: string[] }[];
   };
   cards: Card[];

@@ -174,6 +174,13 @@ create index if not exists messages_game_channel_id on messages(game_id, channel
 alter table pings add column if not exists game_id int;
 update pings set game_id = (select min(id) from game) where game_id is null;
 alter table flash_slots add column if not exists game_id int not null default 1;
+-- per-game settings chosen by the host, pause, spectators
+alter table game add column if not exists live_min int not null default 70;
+alter table game add column if not exists head_start_min int not null default 10;
+alter table game add column if not exists zone_radius_m int not null default 80;
+alter table game add column if not exists missions_mode text not null default 'chill';
+alter table game add column if not exists paused_at timestamptz;
+alter table players add column if not exists spectator boolean not null default false;
 do $$ begin
   if not exists (select 1 from pg_constraint where conname = 'flash_slots_game_pk') then
     alter table flash_slots drop constraint if exists flash_slots_pkey;

@@ -2,6 +2,7 @@
 import { upload } from "@vercel/blob/client";
 import { useEffect, useState } from "react";
 import type { Fix, GameState, Mission } from "./types";
+import { play } from "./sound";
 import { buzz, post, pts } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
@@ -98,6 +99,7 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
       });
       const r = await post<{ message: string }>("/api/quests", { missionId: m.id, pathname: blob.pathname, lat: fix.lat, lng: fix.lng, acc: fix.acc });
       buzz([60, 40, 60]);
+      play("mission");
       toast(r.message);
       setFile(null);
       setPreview(null);
@@ -123,9 +125,6 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
       </button>
       {open && (
         <div className="body">
-          {m.abandoned && (
-            <div className="notice danger-note">Luogo abbandonato: la prova si fa da fuori, dalla strada. Mai entrare, mai scavalcare recinzioni.</div>
-          )}
           <p className="small">{m.task}</p>
           {done ? (
             <ProofMedia id={m.proofId!} kind={m.kind} />
@@ -182,7 +181,7 @@ export function Missions({ s, fix, refresh, toast }: { s: GameState; fix: Fix | 
         {!fix && <span className="chip">GPS…</span>}
       </div>
       {f.missions.some((m) => m.abandoned) && (
-        <div className="notice danger-note">Le missioni &quot;Abbandonato&quot; si fanno sempre da fuori, dal marciapiede o dalla piazza. Non entrate negli edifici e non scavalcate.</div>
+        <div className="notice danger-note">Luoghi abbandonati: al buio possono essere pericolosi e spesso sono proprietà privata. Valutate voi.</div>
       )}
       <p className="muted small">Andate sul posto e fate la foto o il video richiesto. I punti arrivano appena la prova è inviata. Le prove le vedono solo i fuggiaschi, e tutti a fine partita.</p>
       {list.map((m) => (

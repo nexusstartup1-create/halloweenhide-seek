@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Avatar } from "./Avatar";
 import { ProofMedia } from "./Missions";
+import { play as playSfx } from "./sound";
 import { canRecord, VoiceBubble, VoiceRecorder } from "./Voice";
 import { TcgCard } from "./TcgCard";
 import { HoldButton } from "./HoldButton";
@@ -16,6 +17,7 @@ type Toast = (text: string, bad?: boolean) => void;
 
 function PhaseTimer({ s, now }: { s: GameState; now: number }) {
   const g = s.game;
+  if (g.phase === "PAUSED") return <div><div className="lbl" style={{ color: "var(--accent)" }}>Partita</div><div className="timer">In pausa</div></div>;
   if (g.phase === "LOBBY") return <div><div className="lbl">In attesa del via</div><div className="timer">--:--</div></div>;
   if (g.phase === "HEAD_START") {
     return (
@@ -203,6 +205,7 @@ export function Ghost({ s, now, refresh, toast }: { s: GameState; now: number; r
     try {
       const r = await post<{ message: string }>("/api/cards", { cardId: card.id });
       buzz(80);
+      playSfx("whisper");
       toast(r.message);
       refresh();
     } catch (e) {
@@ -309,6 +312,7 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
       setV(r);
       if (r.result === "OK") {
         buzz([80, 60, 300]);
+        playSfx("capture");
         setPw("");
       } else buzz(200);
       refresh();
@@ -414,6 +418,7 @@ export function Deck({ s, now, refresh, toast }: { s: GameState; now: number; re
     setBusy(true);
     try {
       const r = await post<{ message: string }>("/api/cards", { cardId: card.id, target });
+      playSfx(card.code === "RADAR_PING" ? "ping" : "card");
       toast(r.message);
       setSel(null);
       setTarget(null);

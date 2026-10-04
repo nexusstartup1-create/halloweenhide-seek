@@ -4,13 +4,13 @@ import { del as delBlob, put as putBlob } from "@vercel/blob";
 import { q, tx } from "./db";
 import { CARDS, cardState, type CardCode, type CardRow } from "./cards";
 import {
-  CAPTURE_BOUNTY, ZONE_MAX_OFFSET_M, ZONE_RADIUS_M, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_MIN, HOST_STALE_MIN, LIVE_MIN,
-  PAIR_NAMES, PASSWORD_WORDS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
+  CAPTURE_BOUNTY, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_OPTIONS, HOST_STALE_MIN, LIVE_OPTIONS,
+  missionsFor, PAIR_NAMES, PASSWORD_WORDS, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
 import { bearing, compass, distanceM, inPolygon, neighbours, sectorOf, sectorPolygons } from "./geo";
 
-export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "ENDED";
+export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "PAUSED" | "ENDED";
 export type Role = "HUNTER" | "FUGITIVE";
 
 export interface GameRow {
@@ -26,6 +26,11 @@ export interface GameRow {
   winner_kind: "HUNTER" | "PAIR" | null;
   winner_id: string | null;
   host_id: string | null;
+  live_min: number;
+  head_start_min: number;
+  zone_radius_m: number;
+  missions_mode: "chill" | "abbandonati";
+  paused_at: Date | null;
 }
 
 export interface PlayerRow {
@@ -46,6 +51,7 @@ export interface PlayerRow {
   out_since: Date | null;
   out_reported: boolean;
   last_seen: Date | null;
+  spectator: boolean;
 }
 
 export class GameError extends Error {}
@@ -79,6 +85,7 @@ function code(n: number) {
 export function phaseOf(g: GameRow, now = Date.now()): Phase {
   if (!g.started_at) return "LOBBY";
   if (g.ended_at) return "ENDED";
+  if (g.paused_at) return "PAUSED";
   if (g.ends_at && now >= +g.ends_at) return "ENDED";
   if (g.live_at && now < +g.live_at) return "HEAD_START";
   return "LIVE";
@@ -99,7 +106,7 @@ export async function getGame(c: Db | null, gid: number) {
 
 /** Ends the game once the timer is over. Idempotent. */
 async function ensureFinalized(g: GameRow) {
-  if (g.started_at && !g.ended_at && g.ends_at && Date.now() >= +g.ends_at) {
+  if (g.started_at && !g.ended_at && !g.paused_at && g.ends_at && Date.now() >= +g.ends_at) {
     await endGame(g.id, g.ends_at);
     return getGame(null, g.id);
   }
@@ -123,7 +130,7 @@ export async function hunterTotals(c: Db | null, gid: number) {
     `select p.id, p.name, coalesce(sum(l.hunter_delta), 0)::int as stolen,
             max(l.at) filter (where l.hunter_delta > 0) as last_at
        from players p left join ledger l on l.hunter_id = p.id
-      where p.role = 'HUNTER' and p.game_id = $1 group by p.id, p.name
+      where p.role = 'HUNTER' and p.game_id = $1 and not p.spectator group by p.id, p.name
       order by stolen desc, last_at asc nulls last, p.name`,
     [gid],
   );
@@ -236,11 +243,12 @@ async function invalidateDraw(c: Db, gid: number) {
 }
 
 /** A new game in one of the zones. Returns its 5-letter code; the creator joins it as host right after. */
-export async function createGame(zone: string) {
-  if (!(zone in ZONES)) throw new GameError("Scegli la zona: Cirenaica o San Donato.");
+export async function createGame(zone: string, missionsMode = "chill") {
+  if (!(zone in ZONES)) throw new GameError("Scegli una zona di gioco.");
+  const mode = missionsMode === "abbandonati" ? "abbandonati" : "chill";
   for (let i = 0; i < 20; i++) {
     const c5 = code(5);
-    const r = await q<{ id: number }>("insert into game (code, zone) values ($1, $2) on conflict (code) do nothing returning id", [c5, zone]);
+    const r = await q<{ id: number }>("insert into game (code, zone, missions_mode) values ($1, $2, $3) on conflict (code) do nothing returning id", [c5, zone, mode]);
     if (r.length) return c5;
   }
   throw new GameError("Non sono riuscito a creare la partita. Riprova.");
@@ -252,27 +260,32 @@ export async function findGameByCode(raw: string) {
   return g;
 }
 
-export async function joinGame(gameCode: string, name: string, role: string) {
+/** Validates a player's name and role; returns the cleaned name. */
+export function checkPlayer(name: string, role: string) {
   const clean = name.trim().replace(/\s+/g, " ").slice(0, 20);
   if (clean.length < 2) throw new GameError("Scrivi un nome di almeno 2 lettere.");
   if (role !== "HUNTER" && role !== "FUGITIVE") throw new GameError("Scegli se sei cercatore o fuggiasco.");
+  return clean;
+}
+
+export async function joinGame(gameCode: string, name: string, role: string) {
+  const clean = checkPlayer(name, role);
   const game = await findGameByCode(gameCode);
   const gid = game.id;
   return tx(async (c) => {
-    // You can join in the lobby, or after a game has ended (you play from the next one). Not mid-game.
+    // Joining mid-game makes you a spectator until the next round.
     const phase = phaseOf(await getGame(c, gid));
-    if (phase === "HEAD_START" || phase === "LIVE") {
-      throw new GameError("C'è una partita in corso: potrai entrare alla prossima. Se eri già dentro, usa \"Ho un codice\".");
-    }
+    const spectator = phase === "HEAD_START" || phase === "LIVE" || phase === "PAUSED";
     const taken = await c.query("select 1 from players where game_id = $1 and name_key = $2", [gid, clean.toLowerCase()]);
     if (taken.rowCount) throw new GameError(`C'è già un giocatore chiamato ${clean}. Se sei tu, rientra con il codice.`);
     if (phase === "LOBBY") await invalidateDraw(c, gid);
     const id = `p_${code(8).toLowerCase()}`;
     let rejoin = code(4);
     while ((await c.query("select 1 from players where rejoin_code = $1", [rejoin])).rowCount) rejoin = code(4);
-    await c.query("insert into players (id, game_id, name, name_key, role, rejoin_code, last_seen) values ($1, $2, $3, $4, $5, $6, now())", [
-      id, gid, clean, clean.toLowerCase(), role, rejoin,
+    await c.query("insert into players (id, game_id, name, name_key, role, rejoin_code, last_seen, spectator) values ($1, $2, $3, $4, $5, $6, now(), $7)", [
+      id, gid, clean, clean.toLowerCase(), role, rejoin, spectator,
     ]);
+    if (spectator) await sysMsg(c, gid, "BROADCAST", `${clean} segue la partita da spettatore e gioca dalla prossima.`);
     await ensureHost(c, gid);
     return id;
   });
@@ -294,14 +307,86 @@ export async function setRole(me: PlayerRow, role: string) {
   });
 }
 
+/** Leaving (yourself, in the lobby) or kicking (host, any time). */
 export async function removePlayer(me: PlayerRow, playerId: string) {
+  const gid = me.game_id;
+  let checkEnd = false;
+  await tx(async (c) => {
+    const g = await getGame(c, gid);
+    const phase = phaseOf(g);
+    if (playerId === me.id) {
+      if (phase !== "LOBBY" && phase !== "ENDED") throw new GameError("Durante la partita non puoi uscire da solo: chiedi all'organizzatore.");
+    } else {
+      await requireHost(c, me);
+    }
+    const [p] = (await c.query<PlayerRow>("select * from players where id = $1 and game_id = $2", [playerId, gid])).rows;
+    if (!p) throw new GameError("Giocatore non trovato.");
+    if (phase === "LOBBY") await invalidateDraw(c, gid);
+    await c.query("delete from players where id = $1", [playerId]);
+    if (playerId !== me.id) await sysMsg(c, gid, "BROADCAST", `${p.name} è stato tolto dalla partita dall'organizzatore.`);
+    await ensureHost(c, gid);
+    checkEnd = phase === "LIVE" && p.role === "FUGITIVE";
+  });
+  if (checkEnd) {
+    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE' and not spectator", [gid]);
+    if (n === 0) await endGame(gid, new Date());
+  }
+}
+
+/** Host settings, editable in the lobby: hunt length, head start, zone circle and kind of missions. */
+export async function updateSettings(me: PlayerRow, b: { liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string }) {
   await tx(async (c) => {
     await requireLobby(c, me.game_id);
-    if (playerId !== me.id) await requireHost(c, me);
-    await invalidateDraw(c, me.game_id);
-    await c.query("delete from players where id = $1 and game_id = $2", [playerId, me.game_id]);
-    await ensureHost(c, me.game_id);
+    await requireHost(c, me);
+    const g = await getGame(c, me.game_id);
+    const live = b.liveMin != null && LIVE_OPTIONS.includes(Number(b.liveMin)) ? Number(b.liveMin) : g.live_min;
+    const head = b.headStartMin != null && HEAD_START_OPTIONS.includes(Number(b.headStartMin)) ? Number(b.headStartMin) : g.head_start_min;
+    const radius = b.zoneRadiusM != null && RADIUS_OPTIONS.includes(Number(b.zoneRadiusM)) ? Number(b.zoneRadiusM) : g.zone_radius_m;
+    const mode = b.missionsMode === "abbandonati" || b.missionsMode === "chill" ? b.missionsMode : g.missions_mode;
+    await c.query("update game set live_min = $1, head_start_min = $2, zone_radius_m = $3, missions_mode = $4 where id = $5", [live, head, radius, mode, g.id]);
   });
+}
+
+/** Pause: freezes the game clock, card timers and pings until the host resumes. */
+export async function pauseGame(me: PlayerRow) {
+  await tx(async (c) => {
+    const g = await requireHost(c, me);
+    const phase = phaseOf(g);
+    if (phase !== "HEAD_START" && phase !== "LIVE") throw new GameError("Si può mettere in pausa solo una partita in corso.");
+    await c.query("update game set paused_at = now() where id = $1", [g.id]);
+    await sysMsg(c, g.id, "BROADCAST", "Partita in pausa. Fermatevi dove siete.");
+  });
+}
+
+export async function resumeGame(me: PlayerRow) {
+  await tx(async (c) => {
+    const g = await requireHost(c, me);
+    if (!g.paused_at) throw new GameError("La partita non è in pausa.");
+    // Shift every running clock forward by the length of the pause.
+    const shift = "(now() - (select paused_at from game where id = $1))";
+    await c.query(`update cards set active_until = active_until + ${shift} where active_until > (select paused_at from game where id = $1) and owner_id in (select id from players where game_id = $1)`, [g.id]);
+    await c.query(`update cards set cooldown_until = cooldown_until + ${shift} where cooldown_until > (select paused_at from game where id = $1) and owner_id in (select id from players where game_id = $1)`, [g.id]);
+    await c.query(`update pings set expires_at = expires_at + ${shift} where game_id = $1 and expires_at > (select paused_at from game where id = $1)`, [g.id]);
+    await c.query(`update game set live_at = live_at + ${shift}, ends_at = ends_at + ${shift}, paused_at = null where id = $1`, [g.id]);
+    await sysMsg(c, g.id, "BROADCAST", "Si riparte!");
+  });
+}
+
+/** Ends the game now. A winner is named only if the hunt had already started. */
+export async function terminateGame(me: PlayerRow) {
+  const g = await tx(async (c) => requireHost(c, me));
+  const phase = phaseOf(g);
+  if (phase === "LOBBY" || phase === "ENDED") throw new GameError("Nessuna partita in corso.");
+  const huntStarted = !!g.live_at && Date.now() >= +g.live_at;
+  if (huntStarted) {
+    await q("update game set paused_at = null where id = $1", [g.id]);
+    await endGame(g.id, new Date());
+  } else {
+    await tx(async (c) => {
+      await c.query("update game set ended_at = now(), paused_at = null, winner_kind = null, winner_id = null where id = $1 and ended_at is null", [g.id]);
+      await sysMsg(c, g.id, "BROADCAST", "Partita interrotta dall'organizzatore.");
+    });
+  }
 }
 
 export async function drawPairs(me: PlayerRow) {
@@ -360,7 +445,7 @@ export async function startGame(me: PlayerRow) {
     await requireHost(c, me);
     if (!g.drawn_at) throw new GameError("Prima estraete le coppie.");
     await clearRound(c, gid, false);
-    await c.query("update players set status = 'ACTIVE', captured_by = null, captured_at = null, out_since = null, out_reported = false where game_id = $1", [gid]);
+    await c.query("update players set status = 'ACTIVE', captured_by = null, captured_at = null, out_since = null, out_reported = false, spectator = false where game_id = $1", [gid]);
     await c.query("update pairs set pool = $1, last_gain_at = null where game_id = $2", [SEED_POOL, gid]);
     for (const p of (await c.query("select id from pairs where game_id = $1", [gid])).rows) {
       await c.query("insert into ledger (game_id, kind, pair_id, pair_delta) values ($1, 'SEED', $2, $3)", [gid, p.id, SEED_POOL]);
@@ -372,13 +457,13 @@ export async function startGame(me: PlayerRow) {
     }
     await c.query(
       `update game set started_at = now(), live_at = now() + make_interval(mins => $1::int),
-              ends_at = now() + make_interval(mins => $1::int + $2::int), ended_at = null, winner_kind = null, winner_id = null
+              ends_at = now() + make_interval(mins => $1::int + $2::int), ended_at = null, winner_kind = null, winner_id = null, paused_at = null
         where id = $3`,
-      [HEAD_START_MIN, LIVE_MIN, gid],
+      [g.head_start_min, g.live_min, gid],
     );
-    await sysMsg(c, gid, "BROADCAST", `Si parte! ${HEAD_START_MIN} minuti di vantaggio ai fuggiaschi, poi caccia aperta per ${LIVE_MIN} minuti.`);
+    await sysMsg(c, gid, "BROADCAST", `Si parte! ${g.head_start_min} minuti di vantaggio ai fuggiaschi, poi caccia aperta per ${g.live_min} minuti.`);
     const all = (await c.query("select id from players where game_id = $1", [gid])).rows.map((r) => r.id as string);
-    notify(all, "Si parte!", `${HEAD_START_MIN} minuti di vantaggio ai fuggiaschi. Buona caccia.`, "start");
+    notify(all, "Si parte!", `${g.head_start_min} minuti di vantaggio ai fuggiaschi. Buona caccia.`, "start");
   });
 }
 
@@ -389,11 +474,11 @@ export async function newRound(me: PlayerRow) {
     await requireHost(c, me);
     if (phaseOf(g) !== "ENDED") throw new GameError("Si può ricominciare solo a partita finita.");
     await clearRound(c, gid, true);
-    await c.query("update players set pair_id = null, password = null, status = 'ACTIVE', captured_by = null, captured_at = null where game_id = $1", [gid]);
+    await c.query("update players set pair_id = null, password = null, status = 'ACTIVE', captured_by = null, captured_at = null, spectator = false where game_id = $1", [gid]);
     await c.query("delete from pairs where game_id = $1", [gid]);
     await c.query(
       `update game set round = round + 1, drawn_at = null, started_at = null, live_at = null, ends_at = null,
-              ended_at = null, winner_kind = null, winner_id = null where id = $1`,
+              ended_at = null, winner_kind = null, winner_id = null, paused_at = null where id = $1`,
       [gid],
     );
   });
@@ -428,6 +513,7 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
   const gid = hunter.game_id;
   const g = await getGame(null, gid);
   const phase = phaseOf(g);
+  if (hunter.spectator) throw new GameError("Sei spettatore: giochi dalla prossima partita.");
   if (phase !== "LIVE") return { result: "PHASE", phase };
   const pw = normalize(raw);
   const lock = await lockState(hunterId);
@@ -437,7 +523,7 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
     const log = (result: string, targetId: string | null = null) =>
       c.query("insert into capture_attempts (hunter_id, input, result, target_id) values ($1, $2, $3, $4)", [hunterId, pw, result, targetId]);
 
-    const [t] = (await c.query<PlayerRow>("select * from players where game_id = $1 and password = $2 and role = 'FUGITIVE' for update", [gid, pw])).rows;
+    const [t] = (await c.query<PlayerRow>("select * from players where game_id = $1 and password = $2 and role = 'FUGITIVE' and not spectator for update", [gid, pw])).rows;
     if (!t) {
       await log("WRONG");
       const [{ n }] = (
@@ -489,7 +575,7 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
   });
 
   if (out.result === "OK") {
-    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE'", [gid]);
+    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE' and not spectator", [gid]);
     if (n === 0) await endGame(gid, new Date());
   }
   return out;
@@ -501,6 +587,7 @@ export async function playCard(player: PlayerRow, cardId: number, target: string
   const gid = player.game_id;
   const g = await getGame(null, gid);
   const BOUNDARY = zoneOf(g.zone).boundary;
+  if (player.spectator) throw new GameError("Sei spettatore: giochi dalla prossima partita.");
   if (phaseOf(g) !== "LIVE") throw new GameError("Le carte si giocano solo a caccia aperta.");
 
   return tx(async (c) => {
@@ -581,7 +668,7 @@ export async function playCard(player: PlayerRow, cardId: number, target: string
 
 /** Active fugitives of game $1 with a recent GPS fix and no Nebbia running. */
 const VISIBLE_FUGITIVES = `
-  select p.* from players p where p.game_id = $1 and p.role = 'FUGITIVE' and p.status = 'ACTIVE'
+  select p.* from players p where p.game_id = $1 and p.role = 'FUGITIVE' and p.status = 'ACTIVE' and not p.spectator
      and p.fix_at > now() - interval '${FRESH_FIX_MS / 1000} seconds'
      and not exists (select 1 from cards k join players m on m.id = k.owner_id
                       where m.pair_id = p.pair_id and k.code = 'NEBBIA' and not k.voided and k.active_until > now())`;
@@ -601,6 +688,8 @@ export interface Zone { lat: number; lng: number; radiusM: number; ageS: number 
  */
 export async function hunterZones(g: GameRow): Promise<Zone[]> {
   const round = g.round;
+  const ZONE_RADIUS_M = g.zone_radius_m;
+  const ZONE_MAX_OFFSET_M = Math.round(g.zone_radius_m * 0.69);
   await q(
     `update players p set
         blur_lat = p.lat + (r.d * cos(r.a)) / 111320.0,
@@ -643,7 +732,7 @@ export function flashNow(g: GameRow, now = Date.now()) {
   const every = FLASH_EVERY_MIN * 60_000;
   const slot = Math.floor(elapsed / every);
   if (elapsed - slot * every >= FLASH_LEN_MIN * 60_000) return null;
-  const missions = zoneOf(g.zone).missions;
+  const missions = missionsFor(g.zone, g.missions_mode);
   const h = (g.round * 7919 + slot * 104729 + g.id * 31) % missions.length;
   return { slot, mission: missions[h], until: new Date(+g.live_at + slot * every + FLASH_LEN_MIN * 60_000) };
 }
@@ -671,8 +760,8 @@ export async function checkMissionUpload(me: PlayerRow, missionId: string, lat: 
   const g = await getGame(null, me.game_id);
   const phase = phaseOf(g);
   if (phase !== "LIVE" && phase !== "HEAD_START") throw new GameError("Le missioni sono aperte solo durante la partita.");
-  if (me.role !== "FUGITIVE" || me.status !== "ACTIVE" || !me.pair_id) throw new GameError("Solo i fuggiaschi in gioco fanno le missioni.");
-  const m = zoneOf(g.zone).missions.find((x) => x.id === missionId);
+  if (me.role !== "FUGITIVE" || me.status !== "ACTIVE" || !me.pair_id || me.spectator) throw new GameError("Solo i fuggiaschi in gioco fanno le missioni.");
+  const m = missionsFor(g.zone, g.missions_mode).find((x) => x.id === missionId);
   if (!m) throw new GameError("Missione non trovata.");
   const d = distanceM(lat, lng, m.lat, m.lng);
   if (!Number.isFinite(d) || d > m.radiusM + Math.min(acc || 0, 25)) {
@@ -748,7 +837,7 @@ export async function reportLocation(player: PlayerRow, lat: number, lng: number
   const BOUNDARY = zoneOf(g.zone).boundary;
   const phase = phaseOf(g);
   await q("update players set lat = $1, lng = $2, acc_m = $3, fix_at = now() where id = $4", [lat, lng, acc, player.id]);
-  if (!player.role || player.status !== "ACTIVE" || (phase !== "LIVE" && phase !== "HEAD_START")) return;
+  if (!player.role || player.status !== "ACTIVE" || player.spectator || (phase !== "LIVE" && phase !== "HEAD_START")) return;
 
   if (inPolygon(lng, lat, BOUNDARY)) {
     if (player.out_since) await q("update players set out_since = null, out_reported = false where id = $1", [player.id]);
@@ -774,6 +863,7 @@ type Channel = "HUNTERS" | "FUGITIVES" | "BROADCAST";
 
 /** Team chats are open from the lobby on, so each side can plan before the start. Ghosts join the hunters. */
 export function channelsFor(p: PlayerRow, phase: Phase): Channel[] {
+  if (p.spectator && phase !== "LOBBY" && phase !== "ENDED") return ["BROADCAST"];
   if (p.role === "HUNTER") return ["HUNTERS", "BROADCAST"];
   if (p.role === "FUGITIVE") return p.status === "ACTIVE" || phase === "LOBBY" ? ["FUGITIVES", "BROADCAST"] : ["HUNTERS", "BROADCAST"];
   return ["BROADCAST"];
@@ -879,6 +969,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
   const live = phase === "LIVE";
   if (live) await announceFlash(g);
   const flash = flashNow(g, now);
+  const isHost = g.host_id === me.id;
 
   const channels = channelsFor(me, phase);
   const [messages, alerts, cardRows, hunters, pairs, roster] = await Promise.all([
@@ -894,8 +985,8 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     q<CardRow>("select * from cards where owner_id = $1 order by id", [me.id]),
     hunterTotals(null, g.id),
     pairTable(null, g.id),
-    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null }>(
-      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind from players where game_id = $1 order by joined_at",
+    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null }>(
+      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen from players where game_id = $1 order by joined_at",
       [g.id],
     ),
   ]);
@@ -928,21 +1019,28 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       boundary: BOUNDARY,
       whatsappUrl: WHATSAPP_URL,
       winner,
-      headStartMin: HEAD_START_MIN,
-      liveMin: LIVE_MIN,
+      headStartMin: g.head_start_min,
+      liveMin: g.live_min,
+      missionsMode: g.missions_mode,
+      pausedAt: g.paused_at,
+      options: { live: LIVE_OPTIONS, headStart: HEAD_START_OPTIONS, radius: RADIUS_OPTIONS },
       hostId: g.host_id,
       hostName: roster.find((r) => r.id === g.host_id)?.name ?? null,
       hostStale: hostIsStale((await q<PlayerRow>("select * from players where id = $1", [g.host_id]))[0]),
       captureBounty: CAPTURE_BOUNTY,
-      zoneRadiusM: ZONE_RADIUS_M,
+      zoneRadiusM: g.zone_radius_m,
     },
-    me: { id: me.id, name: me.name, role: me.role, status: me.status, pairId: me.pair_id, rejoinCode: me.rejoin_code },
+    // Host panel: everyone's rejoin code and status.
+    hostView: isHost
+      ? roster.map((p) => ({ id: p.id, name: p.name, role: p.role, status: p.status, spectator: p.spectator, rejoinCode: p.rejoin_code, lastSeen: p.last_seen }))
+      : null,
+    me: { id: me.id, name: me.name, role: me.role, status: me.status, pairId: me.pair_id, rejoinCode: me.rejoin_code, spectator: me.spectator },
     avatars: Object.fromEntries(roster.filter((p) => p.avatar_at).map((p) => [p.id, +p.avatar_at!])),
     typing: roster
       .filter((p) => p.id !== me.id && p.typing_at && now - +p.typing_at < 5000 && channels.includes(p.typing_channel as Channel))
       .map((p) => ({ id: p.id, name: p.name, channel: p.typing_channel, audio: p.typing_kind === "audio" })),
     lobby: {
-      players: roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id })),
+      players: roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, spectator: p.spectator })),
       pairs: pairs.map((p) => ({ id: p.id, name: p.name, members: roster.filter((r) => r.pair_id === p.id).map((r) => r.name) })),
     },
     cards,
@@ -954,7 +1052,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       await q<{ id: number }>("select id::int as id from messages where game_id = $2 and channel = any($1) and deleted_at is not null", [channels, g.id])
     ).map((r) => r.id),
     results:
-      phase === "ENDED"
+      phase === "ENDED" || (me.spectator && phase !== "LOBBY")
         ? {
             hunters: hunters.map((h) => ({ id: h.id, name: h.name, stolen: h.stolen })),
             pairs: pairs.map((p) => ({ id: p.id, name: p.name, pool: p.pool, active: p.active })).sort((a, b) => b.pool - a.pool),
@@ -962,8 +1060,10 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
         : null,
   };
 
+  if (me.spectator && phase !== "LOBBY" && phase !== "ENDED") return base;
+
   if (me.role === "HUNTER" && phase !== "LOBBY") {
-    const fugitives = roster.filter((r) => r.role === "FUGITIVE" && r.pair_id).sort((a, b) => a.pair_id!.localeCompare(b.pair_id!));
+    const fugitives = roster.filter((r) => r.role === "FUGITIVE" && r.pair_id && !r.spectator).sort((a, b) => a.pair_id!.localeCompare(b.pair_id!));
     const pings = await q(
       `select pg.id::int as id, pg.origin, pg.sectors, pg.expires_at, p.name as hunter
          from pings pg join players p on p.id = pg.hunter_id where pg.game_id = $1 and pg.expires_at > now() order by pg.id desc`,
@@ -1000,7 +1100,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     const pair = pairs.find((p) => p.id === me.pair_id)!;
     const [partner] = await q<PlayerRow>("select * from players where pair_id = $1 and id <> $2", [me.pair_id, me.id]);
     const proofs = await q<{ id: number; mission_id: string }>("select id::int as id, mission_id from proofs where pair_id = $1", [me.pair_id]);
-    const missions = zone.missions.map((m) => ({
+    const missions = missionsFor(g.zone, g.missions_mode).map((m) => ({
       ...m,
       proofId: proofs.find((p) => p.mission_id === m.id)?.id ?? null,
       flashUntil: flash?.mission.id === m.id ? flash.until : null,

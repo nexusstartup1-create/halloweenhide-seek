@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AvatarPicker } from "./Avatar";
+import { HostPanel, RulesSheet, SettingsSheet, SpectatorView } from "./Panels";
+import { play, setSound as saveSound, soundOn, unlockAudio, type Sfx } from "./sound";
 import { useGeo, useNow, useWakeLock } from "./hooks";
 import { Glyph, Icon } from "./Icons";
 import { Join, Lobby } from "./Lobby";
@@ -37,6 +39,9 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [glass, setGlass] = useState<"clear" | "tinted">("clear");
   const [vibe, setVibe] = useState(true);
+  const [sound, setSoundState] = useState(true);
+  const [sheet, setSheet] = useState<null | "settings" | "host" | "rules">(null);
+  const prevPhase = useRef<string | null>(null);
   const lastMsg = useRef(0);
   const lastAlert = useRef(0);
   const viewKey = useRef("");
@@ -84,9 +89,16 @@ export default function App() {
       try { buzzed = Number(localStorage.getItem(buzzedKey) ?? 0); } catch {}
       if (top > lastAlert.current && lastAlert.current !== 0 && top > buzzed) {
         buzz([200, 100, 200]);
+        const kind = data.alerts[0]?.kind;
+        const sfx: Record<string, Sfx> = { PINGED: "ping", CAPTURED: "capture", PARTNER_DOWN: "alert", REVEALED: "whisper" };
+        play(sfx[kind] ?? "alert");
         try { localStorage.setItem(buzzedKey, String(top)); } catch {}
       }
       lastAlert.current = Math.max(lastAlert.current, top) || -1;
+      // Gong when the game starts and when the hunt opens.
+      const ph = data.game.phase;
+      if (prevPhase.current && prevPhase.current !== ph && (ph === "HEAD_START" || (ph === "LIVE" && prevPhase.current === "HEAD_START"))) play("start");
+      prevPhase.current = ph;
       setS(data);
       setAuth("in");
     } catch {
@@ -98,6 +110,7 @@ export default function App() {
     const first = setTimeout(() => {
       setSeenAlert(readNum("cnh_alert_seen"));
       setVibe(vibrationOn());
+      setSoundState(soundOn());
       setSeenMsg(readNum("cnh_msg_seen"));
       refresh();
     }, 0);
@@ -137,6 +150,13 @@ export default function App() {
     }
   }, []);
 
+  // Browsers allow sound only after a first tap.
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    document.addEventListener("pointerdown", unlock, { once: true });
+    return () => document.removeEventListener("pointerdown", unlock);
+  }, []);
+
   const toggleGlass = () => {
     const next = glass === "clear" ? "tinted" : "clear";
     setGlass(next);
@@ -166,11 +186,13 @@ export default function App() {
   if (auth === "out" || !s) return <Join onDone={refresh} />;
 
   const phase = s.game.phase;
-  const inGame = phase === "HEAD_START" || phase === "LIVE";
+  const inGame = phase === "HEAD_START" || phase === "LIVE" || phase === "PAUSED";
+  const isHost = s.game.hostId === s.me.id;
+  const spectator = inGame && s.me.spectator;
   const hunter = s.me.role === "HUNTER";
   const alert = s.alerts.find((a) => a.id > seenAlert);
   const unread = tab !== "comms" && lastId > seenMsg;
-  const outsider = inGame && (!s.me.role || (!hunter && !s.fugitive));
+  const outsider = inGame && (spectator || !s.me.role || (!hunter && !s.fugitive));
   const ghost = inGame && !outsider && !hunter && s.me.status === "CAPTURED";
   const fullNav = inGame && !outsider && !ghost;
 
@@ -182,16 +204,16 @@ export default function App() {
 
   let screen: React.ReactNode;
   if (tab === "comms") screen = <Comms s={s} messages={messages} refresh={refresh} toast={toast} />;
-  else if (phase === "LOBBY") screen = <Lobby s={s} refresh={refresh} toast={toast} />;
+  else if (phase === "LOBBY") screen = <Lobby s={s} refresh={refresh} toast={toast} openRules={() => setSheet("rules")} openHost={() => setSheet("host")} />;
   else if (phase === "ENDED") screen = <Results s={s} refresh={refresh} toast={toast} />;
   else if (ghost) screen = <Ghost s={s} now={now} refresh={refresh} toast={toast} />;
-  else if (outsider) screen = <div className="full"><p className="muted">Sei entrato dopo l&apos;estrazione, quindi questa partita la segui dalla chat. Giochi dalla prossima.</p></div>;
+  else if (outsider) screen = <SpectatorView s={s} now={now} />;
   else if (tab === "hud") screen = hunter ? <HunterHud s={s} now={now} /> : <FugitiveHud s={s} now={now} />;
   else if (tab === "map") screen = <MapTab s={s} fix={fix} geoError={geoError} />;
   else if (tab === "main") screen = hunter ? <Capture s={s} refresh={refresh} toast={toast} /> : <Missions s={s} fix={fix} refresh={refresh} toast={toast} />;
   else screen = <Deck s={s} now={now} refresh={refresh} toast={toast} />;
 
-  const roleLabel = hunter ? "Cercatore" : ghost ? "Fantasma · aiuta i cercatori" : s.fugitive ? `Fuggiasco · ${s.fugitive.pair.name}` : s.me.role === "FUGITIVE" ? "Fuggiasco" : "In lobby";
+  const roleLabel = spectator ? "Spettatore" : hunter ? "Cercatore" : ghost ? "Fantasma · aiuta i cercatori" : s.fugitive ? `Fuggiasco · ${s.fugitive.pair.name}` : s.me.role === "FUGITIVE" ? "Fuggiasco" : "In lobby";
   const isOn = (id: Tab) => id === tab || (!fullNav && id === "hud" && tab !== "comms");
   const tabBtn = (id: Tab, label: string, icon: React.ReactNode, extra = "") => (
     <button type="button" className={`${extra} ${isOn(id) ? "on" : ""}`} onClick={() => setTab(id)} aria-current={isOn(id) ? "page" : undefined}>
@@ -217,24 +239,20 @@ export default function App() {
           <b>{s.me.name}</b>
           <span>{roleLabel}{inGame ? ` · ${fix ? `GPS ±${Math.round(fix.acc)} m` : geoError ? "GPS spento" : "GPS…"}` : ""}</span>
         </span>
-        <button
-          type="button"
-          className={`iconbtn ${vibe ? "" : "off"}`}
-          onClick={() => { setVibration(!vibe); setVibe(!vibe); toast(vibe ? "Vibrazione disattivata." : "Vibrazione attivata."); }}
-          aria-label={vibe ? "Disattiva vibrazione" : "Attiva vibrazione"}
-          aria-pressed={!vibe}
-          title="Vibrazione"
-        >
-          <Glyph.vibrate />
-        </button>
-        <button type="button" className="iconbtn" onClick={toggleGlass} aria-label={glass === "clear" ? "Vetro più coprente" : "Vetro più trasparente"} title="Trasparenza">
-          <Glyph.drop />
+        {isHost && (
+          <button type="button" className="iconbtn host" onClick={() => setSheet("host")} aria-label="Pannello organizzatore" title="Organizzatore">
+            <Glyph.crown />
+          </button>
+        )}
+        <button type="button" className="iconbtn" onClick={() => setSheet("settings")} aria-label="Impostazioni" title="Impostazioni">
+          <Glyph.gear />
         </button>
         <button type="button" className="iconbtn" onClick={logout} aria-label="Esci">
           <Glyph.exit />
         </button>
       </header>
       <div className="banners">
+        {phase === "PAUSED" && <div className="alert" style={{ background: "rgba(255,102,0,.85)" }}>Partita in pausa · aspettate l&apos;organizzatore</div>}
         {offline && <div className="alert">Connessione persa · riprovo</div>}
         {alert && (
           <button type="button" className="alert" onClick={() => { setSeenAlert(alert.id); writeNum("cnh_alert_seen", alert.id); }}>
@@ -252,11 +270,27 @@ export default function App() {
         </nav>
       ) : (
         <nav className="nav glass" style={{ ["--tabs" as string]: 2 }}>
-          {tabBtn("hud", phase === "LOBBY" ? "Lobby" : phase === "ENDED" ? "Risultati" : ghost ? "Fantasma" : "Partita", <Icon.hud />)}
+          {tabBtn("hud", phase === "LOBBY" ? "Lobby" : phase === "ENDED" ? "Risultati" : ghost ? "Fantasma" : spectator ? "Partita" : "Partita", <Icon.hud />)}
           {tabBtn("comms", "Chat", <Icon.comms />)}
         </nav>
       )}
       {toastMsg && <div className={`toast glass ${toastMsg.bad ? "r" : ""}`} role="status">{toastMsg.text}</div>}
+      {sheet === "settings" && (
+        <SettingsSheet
+          onClose={() => setSheet(null)}
+          sound={sound}
+          setSound={(v) => { saveSound(v); setSoundState(v); if (v) play("card"); }}
+          vibe={vibe}
+          setVibe={(v) => { setVibration(v); setVibe(v); }}
+          glassClear={glass === "clear"}
+          setGlassClear={(v) => { if ((glass === "clear") !== v) toggleGlass(); }}
+          isHost={isHost}
+          openHost={() => setSheet("host")}
+          openRules={() => setSheet("rules")}
+        />
+      )}
+      {sheet === "host" && isHost && <HostPanel s={s} now={now} refresh={refresh} toast={toast} onClose={() => setSheet(null)} />}
+      {sheet === "rules" && <RulesSheet s={s} onClose={() => setSheet(null)} />}
     </div>
   );
 }

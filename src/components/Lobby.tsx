@@ -25,14 +25,18 @@ export function RolePicker({ value, onChange, disabled, big }: { value: Role | n
 }
 
 const ZONE_OPTIONS = [
-  { key: "cirenaica", name: "Cirenaica", desc: "Tra Via Massarenti e la ferrovia: Piazzetta degli Umarells, Via Paolo Fabbri 43, Teatro Dehon." },
-  { key: "sandonato", name: "San Donato", desc: "Dalla ferrovia alla Fiera: Mercato San Donato, Le 8 province, Villaggio dei Ferrovieri." },
+  { key: "cirenaica", name: "Cirenaica", desc: "Piazzetta degli Umarells, Via Paolo Fabbri 43, Teatro Dehon." },
+  { key: "sandonato", name: "San Donato", desc: "Mercato San Donato, Le 8 province, Palazzo degli Affari." },
+  { key: "bolognina", name: "Bolognina", desc: "Piazza dell'Unità, Parco della Zucca, ex Caserma Sani." },
+  { key: "santostefano", name: "Santo Stefano", desc: "Due Torri, Strada Maggiore, Giardini Margherita, ex Staveco." },
 ] as const;
+type ZoneOption = (typeof ZONE_OPTIONS)[number]["key"];
 
 export function Join({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<"create" | "join" | "code">("join");
   const [gameCode, setGameCode] = useState("");
-  const [zone, setZone] = useState<"cirenaica" | "sandonato">("cirenaica");
+  const [zone, setZone] = useState<ZoneOption>("cirenaica");
+  const [missionsMode, setMissionsMode] = useState<"chill" | "abbandonati">("chill");
   const [found, setFound] = useState<{ zoneName: string; players: number; phase: string } | null>(null);
   const [name, setName] = useState("");
   const [role, setRole] = useState<Role | null>(null);
@@ -77,7 +81,7 @@ export function Join({ onDone }: { onDone: () => void }) {
     setErr(null);
     try {
       const body =
-        mode === "create" ? { action: "create", zone, name, role }
+        mode === "create" ? { action: "create", zone, missionsMode, name, role }
         : mode === "join" ? { action: "join", gameCode, name, role }
         : { action: "rejoin", code };
       await post("/api/lobby", body);
@@ -172,6 +176,14 @@ export function Join({ onDone }: { onDone: () => void }) {
                 ))}
               </div>
             </div>
+            <div className="field">
+              <span className="lbl">Missioni</span>
+              <div className="seg">
+                <button type="button" className={missionsMode === "chill" ? "on" : ""} onClick={() => setMissionsMode("chill")}>Chill</button>
+                <button type="button" className={missionsMode === "abbandonati" ? "on" : ""} onClick={() => setMissionsMode("abbandonati")}>Posti abbandonati</button>
+              </div>
+              <span className="muted small">{missionsMode === "chill" ? "Piazze, parchi e luoghi del quartiere." : "Edifici e luoghi abbandonati del quartiere, più qualche missione classica se sono pochi."}</span>
+            </div>
             {who}
             <button type="submit" className="btn a" disabled={busy || name.trim().length < 2 || !role}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
             <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice con il tuo gruppo.</span>
@@ -220,7 +232,7 @@ export function ShareGame({ code, zoneName, toast }: { code: string; zoneName: s
   );
 }
 
-export function Lobby({ s, refresh, toast }: { s: GameState; refresh: () => void; toast: Toast }) {
+export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState; refresh: () => void; toast: Toast; openRules?: () => void; openHost?: () => void }) {
   const [confirm, setConfirm] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const players = s.lobby.players;
@@ -294,6 +306,17 @@ export function Lobby({ s, refresh, toast }: { s: GameState; refresh: () => void
       </div>
 
       <ShareGame code={s.game.code} zoneName={s.game.zoneName} toast={toast} />
+
+      <div className="box">
+        <span className="lbl">Questa partita</span>
+        <span className="small">
+          Missioni <b>{s.game.missionsMode === "abbandonati" ? "posti abbandonati" : "chill"}</b> · caccia <b>{s.game.liveMin}′</b> · vantaggio <b>{s.game.headStartMin}′</b> · cerchio <b>{s.game.zoneRadiusM} m</b>
+        </span>
+        <div className="row" style={{ gap: 8 }}>
+          {openRules && <button type="button" className="btn sm" style={{ flex: 1 }} onClick={openRules}>Come si gioca</button>}
+          {openHost && isHost && <button type="button" className="btn a sm" style={{ flex: 1 }} onClick={openHost}>Impostazioni partita</button>}
+        </div>
+      </div>
 
       <PhoneSetup toast={toast} />
 
