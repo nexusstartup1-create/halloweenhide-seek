@@ -2,27 +2,15 @@
 import { useEffect, useState } from "react";
 import { Avatar, AvatarPicker, uploadAvatar } from "./Avatar";
 import { Cobwebs } from "./Cobwebs";
+import { ShaderBackground } from "@/components/ui/ass";
 import { HoldButton } from "./HoldButton";
 import { PhoneSetup } from "./PhoneSetup";
 import { PumpkinCat } from "./PumpkinCat";
-import type { GameState, Role } from "./types";
+import type { GameState } from "./types";
 import { post } from "./util";
+import { RoleCharacter } from "./GhostAnim";
 
 type Toast = (text: string, bad?: boolean) => void;
-
-const ROLE_LABEL: Record<Role, string> = { HUNTER: "Cercatore", FUGITIVE: "Fuggiasco" };
-
-export function RolePicker({ value, onChange, disabled, big }: { value: Role | null; onChange: (r: Role) => void; disabled?: boolean; big?: boolean }) {
-  return (
-    <div className={`seg accent ${big ? "big" : ""}`} role="radiogroup" aria-label="Ruolo">
-      {(["HUNTER", "FUGITIVE"] as const).map((r) => (
-        <button type="button" key={r} role="radio" aria-checked={value === r} className={value === r ? "on" : ""} disabled={disabled} onClick={() => onChange(r)}>
-          {ROLE_LABEL[r]}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 const ZONE_OPTIONS = [
   { key: "cirenaica", name: "Cirenaica", desc: "Piazzetta degli Umarells, Via Paolo Fabbri 43, Teatro Dehon." },
@@ -32,14 +20,13 @@ const ZONE_OPTIONS = [
 ] as const;
 type ZoneOption = (typeof ZONE_OPTIONS)[number]["key"];
 
-export function Join({ onDone }: { onDone: () => void }) {
+export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => void }) {
   const [mode, setMode] = useState<"create" | "join" | "code">("join");
   const [gameCode, setGameCode] = useState("");
   const [zone, setZone] = useState<ZoneOption>("cirenaica");
   const [missionsMode, setMissionsMode] = useState<"chill" | "abbandonati">("chill");
   const [found, setFound] = useState<{ zoneName: string; players: number; phase: string } | null>(null);
   const [name, setName] = useState("");
-  const [role, setRole] = useState<Role | null>(null);
   const [code, setCode] = useState("");
   const [photo, setPhoto] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -81,8 +68,8 @@ export function Join({ onDone }: { onDone: () => void }) {
     setErr(null);
     try {
       const body =
-        mode === "create" ? { action: "create", zone, missionsMode, name, role }
-        : mode === "join" ? { action: "join", gameCode, name, role }
+        mode === "create" ? { action: "create", zone, missionsMode, name }
+        : mode === "join" ? { action: "join", gameCode, name }
         : { action: "rejoin", code };
       await post("/api/lobby", body);
       if (mode !== "code" && photo) await uploadAvatar(photo).catch(() => {});
@@ -103,7 +90,7 @@ export function Join({ onDone }: { onDone: () => void }) {
             // eslint-disable-next-line @next/next/no-img-element
             <img className="av" src={preview} alt="" style={{ width: 64, height: 64 }} />
           ) : (
-            <span className={`av av-${role === "HUNTER" ? "hunter" : "fugitive"}`} style={{ width: 64, height: 64, fontSize: 26 }}>{name.trim().slice(0, 1).toUpperCase() || "?"}</span>
+            <span className="av av-fugitive" style={{ width: 64, height: 64, fontSize: 26 }}>{name.trim().slice(0, 1).toUpperCase() || "?"}</span>
           )}
           <span className="avpick-badge" aria-hidden="true">+</span>
         </span>
@@ -124,16 +111,13 @@ export function Join({ onDone }: { onDone: () => void }) {
         <span className="lbl">Il tuo nome</span>
         <input id="join-name" className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={20} autoComplete="nickname" placeholder="Mara" />
       </label>
-      <div className="field">
-        <span className="lbl">Ruolo</span>
-        <RolePicker value={role} onChange={setRole} big />
-        <span className="muted small">Le coppie dei fuggiaschi si estraggono a sorte in lobby.</span>
-      </div>
+      <p className="muted small">Il ruolo non si sceglie: cercatori e fuggiaschi si estraggono a sorte in lobby. Il compagno di fuga invece lo scegliete voi.</p>
     </>
   );
 
   return (
     <form className="login" onSubmit={submit}>
+      <div className="loginbg" aria-hidden="true"><ShaderBackground /></div>
       <Cobwebs />
       <div className="lbl brand">Halloween · Bologna</div>
       <div className="hero">
@@ -159,7 +143,7 @@ export function Join({ onDone }: { onDone: () => void }) {
               <span className="muted small">Chiedi le 5 lettere a chi ha creato la partita, o apri il link che ti ha mandato.</span>
             )}
             {who}
-            <button type="submit" className="btn a" disabled={busy || gameCode.length !== 5 || name.trim().length < 2 || !role}>{busy ? "Entro…" : "Entra in partita"}</button>
+            <button type="submit" className="btn a" disabled={busy || gameCode.length !== 5 || name.trim().length < 2}>{busy ? "Entro…" : "Entra in partita"}</button>
           </>
         )}
 
@@ -185,7 +169,7 @@ export function Join({ onDone }: { onDone: () => void }) {
               <span className="muted small">{missionsMode === "chill" ? "Piazze, parchi e luoghi del quartiere." : "Edifici e luoghi abbandonati del quartiere, più qualche missione classica se sono pochi."}</span>
             </div>
             {who}
-            <button type="submit" className="btn a" disabled={busy || name.trim().length < 2 || !role}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
+            <button type="submit" className="btn a" disabled={busy || name.trim().length < 2}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
             <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice con il tuo gruppo.</span>
           </>
         )}
@@ -202,6 +186,7 @@ export function Join({ onDone }: { onDone: () => void }) {
         )}
         {err && <div className="notice" style={{ background: "var(--threat-soft)", color: "#ff5a62" }}>{err}</div>}
       </div>
+      {onGuide && <button type="button" className="linkbtn guidelink" onClick={onGuide}>Come funziona? Rivedi la guida</button>}
     </form>
   );
 }
@@ -238,7 +223,19 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
   const players = s.lobby.players;
   const hunters = players.filter((p) => p.role === "HUNTER");
   const fugitives = players.filter((p) => p.role === "FUGITIVE");
-  const canDraw = hunters.length >= 1 && fugitives.length >= 2 && fugitives.length % 2 === 0;
+  const waiting = players.filter((p) => !p.role && !p.spectator);
+  const canDraw = hunters.length >= 1 && fugitives.length >= 2;
+  const rolesDrawn = s.game.rolesDrawn;
+  const canDrawRoles = players.filter((p) => !p.spectator).length >= 3;
+  // Partner choices: two fugitives who picked each other are a pair.
+  const byId = new Map(players.map((p) => [p.id, p]));
+  const mateOf = (p: (typeof players)[number]) => {
+    const o = p.partnerPick ? byId.get(p.partnerPick) : undefined;
+    return o && o.partnerPick === p.id ? o : null;
+  };
+  const meP = byId.get(s.me.id);
+  const myMate = meP ? mateOf(meP) : null;
+  const pairedCount = fugitives.filter((f) => mateOf(f)).length;
   const myPair = s.lobby.pairs.find((p) => p.id === s.me.pairId);
   const isHost = s.game.hostId === s.me.id;
   const canLead = isHost || s.game.hostStale;
@@ -265,6 +262,7 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
           <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={34} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
           <span style={{ fontWeight: me ? 600 : 400, color: me ? "var(--accent)" : undefined }}>{p.name}{me ? " (tu)" : ""}</span>
           {host && <span className="chip a">Organizzatore</span>}
+          {rolesDrawn && !s.game.drawn && p.role === "FUGITIVE" && (mateOf(p) ? <span className="chip fa">coppia ✓</span> : p.partnerPick ? <span className="chip">ha scelto {byId.get(p.partnerPick)?.name}</span> : null)}
         </span>
         {confirm === p.id ? (
           <span className="row" style={{ gap: 6 }}>
@@ -288,9 +286,9 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
     );
   };
 
-  const list = (title: string, ps: typeof players, target: number) => (
+  const list = (title: string, ps: typeof players) => (
     <section className="field">
-      <div className="row"><span className="lbl">{title}</span><span className={`chip ${ps.length === target ? "a" : ""}`}>{ps.length} di {target}</span></div>
+      <div className="row"><span className="lbl">{title}</span><span className="chip">{ps.length}</span></div>
       <div className="box" style={{ gap: 0, paddingBlock: 2 }}>
         {ps.length === 0 && <span className="muted small cell">Ancora nessuno.</span>}
         {ps.map(row)}
@@ -302,7 +300,7 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
     <div className="pad">
       <div>
         <div className="lbl">{s.game.zoneName} · lobby · round {s.game.round}</div>
-        <div className="largetitle">{s.game.drawn ? "Coppie estratte" : "Chi gioca stasera?"}</div>
+        <div className="largetitle">{s.game.drawn ? "Coppie fatte" : rolesDrawn ? "Sceglietevi il compagno" : "Chi gioca stasera?"}</div>
       </div>
 
       <ShareGame code={s.game.code} zoneName={s.game.zoneName} toast={toast} />
@@ -328,11 +326,69 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
           </span>
           <span className="small muted">rientro <span className="code">{s.me.rejoinCode}</span></span>
         </div>
-        <RolePicker value={s.me.role} disabled={busy} onChange={(r) => s.me.role !== r && act({ action: "role", role: r })} />
+        {s.me.role ? (
+          <>
+            <RoleCharacter role={s.me.role} />
+            <div className={`roleverdict ${s.me.role === "HUNTER" ? "hunter" : "fugitive"}`}>{s.me.role === "HUNTER" ? "Sei un cercatore" : "Sei un fuggiasco"}</div>
+          </>
+        ) : (
+          <div className="roleverdict unknown">
+            <span className="q" aria-hidden="true">?</span>
+            Cercatore o fuggiasco? Lo decide la sorte quando l&apos;organizzatore estrae i ruoli.
+          </div>
+        )}
       </div>
 
-      {list("Cercatori", hunters, 2)}
-      {list("Fuggiaschi", fugitives, 8)}
+      {rolesDrawn && !s.game.drawn && s.me.role === "FUGITIVE" && (
+        <section className="field">
+          <div className="row"><span className="lbl">Il tuo compagno</span>{myMate && <span className="chip fa">coppia fatta</span>}</div>
+          {myMate ? (
+            <div className="notice row" style={{ justifyContent: "space-between" }}>
+              <span>Fai coppia con <b>{myMate.name}</b>.</span>
+              <button type="button" className="chip" disabled={busy} onClick={() => act({ action: "pick", partnerId: null })}>Sciogli</button>
+            </div>
+          ) : (
+            <>
+              <p className="muted small">Tocca chi vuoi come compagno. Quando anche lui sceglie te, la coppia è fatta. Chi resta da solo viene accoppiato a caso.</p>
+              <div className="box" style={{ gap: 0, paddingBlock: 2 }}>
+                {fugitives.filter((f) => f.id !== s.me.id && !f.spectator).length === 0 && <span className="muted small cell">Non ci sono altri fuggiaschi.</span>}
+                {fugitives.filter((f) => f.id !== s.me.id && !f.spectator).map((f) => {
+                  const mine = meP?.partnerPick === f.id;
+                  const wantsMe = f.partnerPick === s.me.id;
+                  const taken = !!mateOf(f);
+                  return (
+                    <div key={f.id} className={`cell pickrow ${wantsMe ? "wants" : ""}`}>
+                      <span className="row" style={{ gap: 10, justifyContent: "flex-start", minWidth: 0 }}>
+                        <Avatar id={f.id} name={f.name} at={s.avatars[f.id]} size={34} />
+                        <span>{f.name}</span>
+                        {wantsMe && <span className="chip a">ti ha scelto!</span>}
+                        {taken && <span className="chip">già in coppia</span>}
+                      </span>
+                      {mine ? (
+                        <button type="button" className="chip" disabled={busy} onClick={() => act({ action: "pick", partnerId: null })}>Scelto · annulla</button>
+                      ) : (
+                        <button type="button" className={`chip ${wantsMe ? "fa" : "a"}`} disabled={busy || taken} onClick={() => act({ action: "pick", partnerId: f.id }, wantsMe ? `Coppia fatta con ${f.name}!` : undefined)}>
+                          {wantsMe ? "Accetta" : "Scegli"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {rolesDrawn ? (
+        <>
+          {list("Cercatori", hunters)}
+          {list("Fuggiaschi", fugitives)}
+          {waiting.length > 0 && list("Senza ruolo", waiting)}
+        </>
+      ) : (
+        list("Giocatori", players)
+      )}
 
       {s.game.drawn && (
         <>
@@ -352,24 +408,36 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
       {canLead ? (
         <>
           {!isHost && <div className="notice">{s.game.hostName ?? "L'organizzatore"} non apre l&apos;app da qualche minuto: puoi guidare tu la partita.</div>}
-          {s.game.drawn ? (
+          {!rolesDrawn ? (
+            <>
+              <HoldButton label={busy ? "Estraggo…" : "Tieni premuto per estrarre i ruoli"} disabled={!canDrawRoles || busy} onFire={() => act({ action: "roles" })} />
+              <p className="muted small">
+                {canDrawRoles
+                  ? `Estrai quando ci sono tutti: ${s.game.huntersPlanned} ${s.game.huntersPlanned === 1 ? "cercatore" : "cercatori"} a sorte, gli altri fuggiaschi. Il numero lo cambi in Impostazioni partita.`
+                  : "Servono almeno 3 giocatori: 1 cercatore e 2 fuggiaschi. Nessun limite massimo."}
+              </p>
+            </>
+          ) : s.game.drawn ? (
             <>
               <HoldButton label={busy ? "Avvio…" : "Tieni premuto per avviare"} disabled={busy} ms={1500} onFire={() => act({ action: "start" })} />
-              <button type="button" className="btn ghost" disabled={busy || !canDraw} onClick={() => act({ action: "draw" }, "Nuova estrazione fatta.")}>Rifai l&apos;estrazione</button>
+              <button type="button" className="btn ghost" disabled={busy || !canDraw} onClick={() => act({ action: "draw" }, "Coppie rifatte.")}>Rifai le coppie</button>
               <p className="muted small">Al via: {s.game.headStartMin} minuti di vantaggio ai fuggiaschi, poi {s.game.liveMin} minuti di caccia.</p>
             </>
           ) : (
             <>
-              <HoldButton label={busy ? "Estraggo…" : "Tieni premuto per estrarre le coppie"} disabled={!canDraw || busy} onFire={() => act({ action: "draw" })} />
+              <HoldButton label={busy ? "Chiudo…" : "Tieni premuto per chiudere le coppie"} disabled={!canDraw || busy} onFire={() => act({ action: "draw" })} />
               <p className="muted small">
-                {canDraw ? "Sei l'organizzatore: estrai quando ci sono tutti. Se qualcuno entra o cambia ruolo dopo, si rifà." : "Servono almeno 1 cercatore e un numero pari di fuggiaschi (in 10: consigliati 2 cercatori e 8 fuggiaschi)."}
+                {canDraw
+                  ? `${pairedCount / 2} ${pairedCount / 2 === 1 ? "coppia scelta" : "coppie scelte"}; ${fugitives.length - pairedCount} ${fugitives.length - pairedCount === 1 ? "fuggiasco verrà accoppiato" : "fuggiaschi verranno accoppiati"} a caso${(fugitives.length - pairedCount) % 2 ? " (uno farà il Lupo Solitario)" : ""}.`
+                  : "Servono almeno 1 cercatore e 2 fuggiaschi: rifai l'estrazione dei ruoli."}
               </p>
+              <button type="button" className="btn ghost" disabled={busy || !canDrawRoles} onClick={() => act({ action: "roles" }, "Ruoli estratti di nuovo.")}>Rifai l&apos;estrazione dei ruoli</button>
             </>
           )}
         </>
       ) : (
         <div className="notice">
-          {s.game.drawn ? `Aspetta che ${s.game.hostName} avvii la partita.` : `Aspetta che ${s.game.hostName} estragga le coppie.`}
+          {s.game.drawn ? `Aspetta che ${s.game.hostName} avvii la partita.` : rolesDrawn ? `Quando siete pronti, ${s.game.hostName} chiude le coppie.` : `Aspetta che ${s.game.hostName} estragga i ruoli.`}
         </div>
       )}
     </div>

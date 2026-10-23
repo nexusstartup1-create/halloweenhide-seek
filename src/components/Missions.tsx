@@ -62,7 +62,8 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
-  const near = m.d != null && m.d <= m.radiusM + Math.min(fix?.acc ?? 0, 25);
+  // Special missions have no fixed place: the server checks (hunter nearby, or inside the zone).
+  const near = !!m.special || (m.d != null && m.d <= m.radiusM + Math.min(fix?.acc ?? 0, 25));
   const canPlay = (s.game.phase === "LIVE" || s.game.phase === "HEAD_START") && s.me.status === "ACTIVE";
   const done = m.proofId != null;
   const flash = !done && m.flashUntil != null;
@@ -84,6 +85,7 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
 
   const send = async () => {
     if (!file || !fix || !s.me.pairId) return;
+    if (m.special === "STREET" && !confirm("Il passante ha accettato di partecipare e, se si vede, di essere ripreso?")) return;
     setProgress(0);
     try {
       const data = m.kind === "PHOTO" ? await shrinkPhoto(file) : file;
@@ -116,10 +118,13 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
       <button type="button" onClick={onToggle}>
         <span className="qt">{m.title}</span>
         <span className="qp num">{done ? "✓" : `+${pts(flash ? m.flashPoints! : m.points)}`}</span>
-        <span className="lbl">{m.place} · {m.d != null ? `${Math.round(m.d)} m` : "distanza ?"}{near && !done ? " · sei qui" : ""}</span>
+        <span className="lbl">{m.special ? m.place : `${m.place} · ${m.d != null ? `${Math.round(m.d)} m` : "distanza ?"}${near && !done ? " · sei qui" : ""}`}</span>
         <span className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
           {flash && <span className="chip fr">Lampo ×2</span>}
           {m.abandoned && <span className="chip ghostchip">Abbandonato</span>}
+          {m.special === "AMBUSH" && <span className="chip fr">Agguato</span>}
+          {m.special === "STREET" && <span className="chip ghostchip">Con i passanti</span>}
+          {m.reward && !done && <span className={`chip rewardchip ${m.reward === "ZOMBIE" ? "zombie" : ""}`}>🃏 {m.reward === "ZOMBIE" ? "Zombie" : m.reward === "GHOST_SHIELD" ? "Ghost Shield" : "Eco"}</span>}
           <span className={`chip ${m.kind === "VIDEO" ? "fa" : "a"}`}>{m.kind === "VIDEO" ? "Video" : "Foto"}</span>
         </span>
       </button>
@@ -165,7 +170,7 @@ export function Missions({ s, fix, refresh, toast }: { s: GameState; fix: Fix | 
   const f = s.fugitive!;
   const [open, setOpen] = useState<string | null>(null);
   const list = f.missions
-    .map((m) => ({ ...m, d: fix ? dist(fix, m) : null }))
+    .map((m) => ({ ...m, d: fix && !m.special ? dist(fix, m) : null }))
     .sort(
       (a, b) =>
         Number(a.proofId != null) - Number(b.proofId != null) ||
@@ -181,10 +186,21 @@ export function Missions({ s, fix, refresh, toast }: { s: GameState; fix: Fix | 
         {!fix && <span className="chip">GPS…</span>}
       </div>
       {f.missions.some((m) => m.abandoned) && (
-        <div className="notice danger-note">Luoghi abbandonati: al buio possono essere pericolosi e spesso sono proprietà privata. Valutate voi.</div>
+        <div className="notice danger-note">
+          <b>Posti abbandonati:</b> dentro o fuori lo decidete voi, e spesso sono proprietà privata. Se entrate: mai da soli, torcia sempre accesa quando vi muovete, niente piani alti, tetti, silos o pavimenti che scricchiolano, guardate dove mettete i piedi (vetri, chiodi, buchi). Se dentro c&apos;è già qualcuno, uscite.
+        </div>
       )}
       <p className="muted small">Andate sul posto e fate la foto o il video richiesto. I punti arrivano appena la prova è inviata. Le prove le vedono solo i fuggiaschi, e tutti a fine partita.</p>
-      {list.map((m) => (
+      <p className="muted small"><b>Brivido sì, rischi no:</b> si cammina e non si corre, niente strade, binari o bordi d&apos;acqua, voce bassa dove la gente dorme, e chi non è del gioco non si spaventa e non si riprende.</p>
+      {list.filter((m) => !m.special).map((m) => (
+        <MissionCard key={m.id} m={m} s={s} fix={fix} open={open === m.id} onToggle={() => setOpen(open === m.id ? null : m.id)} refresh={refresh} toast={toast} />
+      ))}
+      <div className="lbl" style={{ marginTop: 10 }}>Agguati e scherzetti</div>
+      <p className="muted small">
+        <b>Agguati:</b> valgono solo se quando inviate la prova un cercatore è davvero vicino (lo controlla il GPS). Se vi vede, può catturarvi.
+        {" "}<b>Con i passanti:</b> solo con chi ha voglia di giocare e dice di sì. Niente spaventi a sorpresa, e chi non vuole non si riprende.
+      </p>
+      {list.filter((m) => m.special).map((m) => (
         <MissionCard key={m.id} m={m} s={s} fix={fix} open={open === m.id} onToggle={() => setOpen(open === m.id ? null : m.id)} refresh={refresh} toast={toast} />
       ))}
     </div>

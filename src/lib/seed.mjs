@@ -2,7 +2,7 @@
 
 export const DROP = `
 drop sequence if exists game_id_seq;
-drop table if exists push_subs, flash_slots, sessions, ledger, proofs, cards, capture_attempts, messages, alerts, pings,
+drop table if exists chat_group_members, chat_groups, push_subs, flash_slots, sessions, ledger, proofs, cards, capture_attempts, messages, alerts, pings,
   quest_completions, quests, players, pairs, game cascade;
 `;
 
@@ -115,6 +115,20 @@ create table if not exists pings (
   at timestamptz not null default now(),
   expires_at timestamptz not null
 );
+create table if not exists chat_groups (
+  id bigserial primary key,
+  game_id int not null,
+  name text not null,
+  created_by text,
+  created_at timestamptz not null default now()
+);
+create table if not exists chat_group_members (
+  group_id bigint not null references chat_groups(id) on delete cascade,
+  player_id text not null references players(id) on delete cascade,
+  added_at timestamptz not null default now(),
+  primary key (group_id, player_id)
+);
+create index if not exists chat_group_members_player on chat_group_members(player_id);
 create table if not exists push_subs (
   endpoint text primary key,
   player_id text not null references players(id) on delete cascade,
@@ -141,8 +155,36 @@ alter table messages add column if not exists audio_path text;
 alter table messages add column if not exists audio_ms int;
 alter table messages add column if not exists audio_type text;
 alter table players add column if not exists typing_kind text;
+alter table players add column if not exists away boolean not null default false;
+alter table players add column if not exists partner_pick text;
+alter table messages add column if not exists radio text;
+alter table game add column if not exists roles_at timestamptz;
+alter table game add column if not exists hunters_n int not null default 0;
 alter table proofs add column if not exists flash boolean not null default false;
 create index if not exists messages_channel_id on messages(channel, id);
+
+-- ---------- replay: where everyone went during the round ----------
+create table if not exists tracks (
+  id bigserial primary key,
+  game_id int not null,
+  player_id text not null,
+  mode text not null, -- H hunter, F fugitive, G ghost
+  lat double precision not null,
+  lng double precision not null,
+  at timestamptz not null default now()
+);
+create index if not exists tracks_game_player on tracks(game_id, player_id, id);
+
+-- ---------- SOS: a player needs help; the game pauses until the host resumes ----------
+create table if not exists sos (
+  id bigserial primary key,
+  game_id int not null,
+  player_id text not null,
+  at timestamptz not null default now(),
+  resolved_at timestamptz,
+  resolved_by text,
+  responders text[] not null default '{}'
+);
 
 -- ---------- many games at once: every row belongs to a game (existing data becomes game 1) ----------
 alter table game add column if not exists code text;

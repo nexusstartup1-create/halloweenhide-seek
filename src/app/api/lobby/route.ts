@@ -1,6 +1,6 @@
 import { currentPlayer, startSession } from "@/lib/auth";
 import {
-  checkPlayer, claimHost, createGame, drawPairs, findByRejoinCode, GameError, joinGame, makeHost, newRound, pauseGame, removePlayer, resumeGame, setRole, startGame,
+  checkPlayer, claimHost, createGame, drawPairs, drawRoles, findByRejoinCode, GameError, joinGame, makeHost, newRound, pauseGame, pickPartner, removePlayer, resumeGame, startGame,
   terminateGame, updateSettings,
 } from "@/lib/game";
 import { body, fail, json } from "@/lib/http";
@@ -9,19 +9,19 @@ export async function POST(req: Request) {
   try {
     const b = await body<{
       action: string; name?: string; role?: string; code?: string; gameCode?: string; zone?: string; playerId?: string;
-      liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string;
+      liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string; huntersN?: number; partnerId?: string | null;
     }>(req);
 
     // Creating, joining and rejoining are the only actions without a session.
     if (b.action === "create") {
-      checkPlayer(String(b.name ?? ""), String(b.role ?? "")); // before creating, so no empty games are left behind
+      checkPlayer(String(b.name ?? "")); // before creating, so no empty games are left behind
       const gameCode = await createGame(String(b.zone ?? ""), String(b.missionsMode ?? "chill"));
-      const id = await joinGame(gameCode, String(b.name ?? ""), String(b.role ?? ""));
+      const id = await joinGame(gameCode, String(b.name ?? ""));
       await startSession(id);
       return json({ ok: true, gameCode });
     }
     if (b.action === "join") {
-      const id = await joinGame(String(b.gameCode ?? ""), String(b.name ?? ""), String(b.role ?? ""));
+      const id = await joinGame(String(b.gameCode ?? ""), String(b.name ?? ""));
       await startSession(id);
       return json({ ok: true });
     }
@@ -34,7 +34,8 @@ export async function POST(req: Request) {
     const me = await currentPlayer();
     if (!me) return json({ error: "Sessione scaduta. Rientra con il tuo codice." }, 401);
     switch (b.action) {
-      case "role": await setRole(me, String(b.role)); break;
+      case "roles": await drawRoles(me); break;
+      case "pick": await pickPartner(me, b.partnerId ? String(b.partnerId) : null); break;
       case "remove": await removePlayer(me, String(b.playerId ?? me.id)); break;
       case "draw": await drawPairs(me); break;
       case "start": await startGame(me); break;

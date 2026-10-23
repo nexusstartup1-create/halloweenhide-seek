@@ -43,5 +43,7 @@ export const CARD_INFO: Record<string, { name: string; effect: string; durationS
   ECO: { name: "Eco", effect: "Un fuggiasco finto nel settore che scegli, sulla mappa dei cercatori e nei radar, per 5 min.", durationS: 300, cooldownS: 0, sector: "ANY" },
   RADAR_PING: { name: "Radar Ping", effect: "Conta i fuggiaschi nel tuo settore e in quelli vicini. Visibile 5 min.", durationS: 300, cooldownS: 1200 },
   SUSSURRO: { name: "Sussurro", effect: "Rivela ai cercatori il settore di un fuggiasco a caso. Ricarica 10 min.", durationS: 0, cooldownS: 600 },
+  ZOMBIE: { name: "Zombie", effect: "Solo da fantasma: risorgi. Torni fuggiasco con una password nuova e 3 minuti di immunità. Una volta sola.", durationS: 0, cooldownS: 0 },
+  JUMPSCARE: { name: "Jumpscare", effect: "Un avversario a caso si ritrova a tutto schermo un'apparizione con urlo e vibrazione. Scherzetto!", durationS: 0, cooldownS: 0 },
   TRACCIA: { name: "Traccia", effect: "Segui in diretta un settore dell'ultimo ping per 5 min.", durationS: 300, cooldownS: 0, sector: "LAST_PING" },
 };

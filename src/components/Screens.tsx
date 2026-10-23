@@ -1,14 +1,19 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Avatar } from "./Avatar";
+import { GhostIntro, GhostLoop, GraveLoop } from "./GhostAnim";
+import { FlameDither } from "@/components/ui/flame-dither";
 import { ProofMedia } from "./Missions";
 import { play as playSfx } from "./sound";
 import { canRecord, VoiceBubble, VoiceRecorder } from "./Voice";
 import { TcgCard } from "./TcgCard";
 import { HoldButton } from "./HoldButton";
+import { Sheet } from "./Panels";
 import { Icon } from "./Icons";
-import MapView, { type MapPoint } from "./MapView";
-import type { Card, Fix, GameState, Message } from "./types";
+import MapView, { sectorCenter, type MapPoint } from "./MapView";
+import { Replay } from "./Replay";
+import { MapLegend, type LegendTarget, type LegendTargets } from "./MapLegend";
+import type { Card, Channel, Fix, GameState, Message } from "./types";
 import { CARD_INFO, ago, buzz, clock, post, pts } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
@@ -30,10 +35,141 @@ function PhaseTimer({ s, now }: { s: GameState; now: number }) {
   return <div><div className="lbl">Tempo rimasto</div><div className="timer">{clock(+new Date(g.endsAt!) - now)}</div></div>;
 }
 
+type PodiumEntry = { key: string; mine: boolean; title: string; sub?: string; points: number; out?: boolean; faces: React.ReactNode[] };
+
+/** Top three on steps (2nd, 1st, 3rd), everyone else listed underneath. */
+function Podium({ entries }: { entries: PodiumEntry[] }) {
+  const top = entries.slice(0, 3);
+  const order = [top[1], top[0], top[2]];
+  const rest = entries.slice(3);
+  return (
+    <div className="podium-wrap">
+      <div className="podium">
+        {order.map((e, i) => {
+          if (!e) return <div key={`empty${i}`} className="step-col" />;
+          const place = i === 1 ? 1 : i === 0 ? 2 : 3;
+          return (
+            <div key={e.key} className={`step-col p${place}${e.mine ? " me" : ""}`}>
+              {place === 1 && <span className="crown" aria-hidden="true">👑</span>}
+              <div className="faces">{e.faces}</div>
+              <b className="who">{e.title}{e.out ? " ✕" : ""}</b>
+              {e.sub && <span className="sub">{e.sub}</span>}
+              <span className="pts num">{pts(e.points)}</span>
+              <div className="step"><span>{place}</span></div>
+            </div>
+          );
+        })}
+      </div>
+      {rest.length > 0 && (
+        <div className="lb">
+          {rest.map((e, i) => (
+            <div key={e.key} className={e.mine ? "me" : ""}><span>{i + 4}</span><span>{e.title}{e.sub ? ` · ${e.sub}` : ""}{e.out ? " ✕" : ""}</span><span>{pts(e.points)}</span></div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Everyone captured during the game, in order, with what their pair lost. */
+function Graveyard({ fallen, meId }: { fallen: NonNullable<GameState["results"]>["fallen"]; meId: string }) {
+  if (!fallen.length) return null;
+  return (
+    <div className="graveyard">
+      <GraveLoop />
+      <span className="lbl">Cimitero · {fallen.length === 1 ? "1 caduto" : `${fallen.length} caduti`}</span>
+      {fallen.map((f) => (
+        <div key={f.id} className={`grave${f.id === meId ? " me" : ""}`}>
+          <span className="rip" aria-hidden="true">RIP</span>
+          <span className="who">
+            <b>{f.name}</b>
+            <small>{f.pair ? `${f.pair} · ` : ""}preso da {f.by} alle {new Date(f.at).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}</small>
+          </span>
+          <span className="lost num">{f.risen ? <small className="risen">🧟 risorto</small> : null}−{pts(f.lost)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type StandingsTab = "general" | "hunters" | "pairs" | "ghosts" | "missions";
+const STANDINGS_TABS: { key: StandingsTab; label: string }[] = [
+  { key: "general", label: "Generale" },
+  { key: "hunters", label: "Cercatori" },
+  { key: "pairs", label: "Coppie" },
+  { key: "ghosts", label: "Fantasmi" },
+  { key: "missions", label: "Missioni" },
+];
+
+/** General ranking (everyone, individually) plus one tab per category. */
+function Standings({ s }: { s: GameState }) {
+  const r = s.results!;
+  const st = r.standings;
+  const [tab, setTab] = useState<StandingsTab>("general");
+  const kindOf = (id: string) => {
+    const p = s.lobby.players.find((x) => x.id === id);
+    return p?.role === "HUNTER" ? "hunter" : r.fallen.some((f) => f.id === id) ? "ghost" : "fugitive";
+  };
+  type Row = { key: string; avatarId?: string; name: string; detail?: string; value: string; mine: boolean; faces?: { id: string; name: string }[] };
+  const rows: Row[] =
+    tab === "general"
+      ? st.general.map((x) => ({ key: x.id, avatarId: x.id, name: x.ghost ? `👻 ${x.name}` : x.name, detail: x.detail, value: pts(x.points), mine: x.id === s.me.id }))
+      : tab === "hunters"
+        ? st.hunters.map((x) => ({ key: x.id, avatarId: x.id, name: x.name, value: pts(x.points), mine: x.id === s.me.id }))
+        : tab === "pairs"
+          ? r.pairs.map((p) => ({
+              key: p.id, name: p.name, detail: `${p.members.map((m) => m.name).join(" & ")}${p.active === 0 ? " · eliminata" : ""}`,
+              value: pts(p.pool), mine: p.id === s.me.pairId, faces: p.members,
+            }))
+          : tab === "ghosts"
+            ? st.ghosts.map((x) => ({ key: x.id, avatarId: x.id, name: x.name, detail: x.detail, value: pts(x.points), mine: x.id === s.me.id }))
+            : st.missions.map((x) => ({
+                key: x.id, avatarId: x.id, name: x.name, detail: x.detail,
+                value: x.count === 1 ? "1 missione" : `${x.count} missioni`, mine: x.id === s.me.id,
+              }));
+  const empty = { general: "Nessun giocatore.", hunters: "Nessun cercatore.", pairs: "Nessuna coppia.", ghosts: "Nessuno è stato catturato.", missions: "Nessun fuggiasco." }[tab];
+  const note = {
+    general: "Cercatori: punti rubati. Fuggiaschi: la propria quota del pool a fine partita (0 se catturati) + quanto rubato da fantasma.",
+    hunters: "Punti rubati con le catture, bonus compresi.",
+    pairs: "Pool rimasto a fine partita: decide chi vince se qualcuno resta libero.",
+    ghosts: "Punti rubati dopo essere diventati fantasmi.",
+    missions: "Prove foto e video caricate da ciascuno.",
+  }[tab];
+  return (
+    <section className="standings">
+      <span className="lbl">Classifiche</span>
+      <div className="chatbar standtabs" role="tablist">
+        {STANDINGS_TABS.map((t) => (
+          <button type="button" key={t.key} role="tab" aria-selected={tab === t.key} className={`chatchip glass ${tab === t.key ? "on" : ""}`} onClick={() => setTab(t.key)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="standlist">
+        {rows.length === 0 && <span className="muted small cell">{empty}</span>}
+        {rows.map((x, i) => (
+          <div key={x.key} className={`standrow ${x.mine ? "me" : ""} ${i < 3 ? `top${i + 1}` : ""}`}>
+            <span className="rank">{i + 1}</span>
+            <span className="faces">
+              {x.faces
+                ? x.faces.map((m) => <Avatar key={m.id} id={m.id} name={m.name} at={s.avatars[m.id]} size={30} kind={kindOf(m.id)} />)
+                : x.avatarId && <Avatar id={x.avatarId} name={x.name.replace("👻 ", "")} at={s.avatars[x.avatarId]} size={32} kind={kindOf(x.avatarId)} />}
+            </span>
+            <span className="who"><b>{x.name}</b>{x.detail && <small>{x.detail}</small>}</span>
+            <span className="val num">{x.value}</span>
+          </div>
+        ))}
+      </div>
+      <p className="muted small">{note}</p>
+    </section>
+  );
+}
+
 export function Results({ s, refresh, toast }: { s: GameState; refresh: () => void; toast: Toast }) {
   const w = s.game.winner;
   const r = s.results;
   const [album, setAlbum] = useState<AlbumItem[] | null>(null);
+  const [replay, setReplay] = useState(false);
   useEffect(() => {
     fetch("/api/album", { cache: "no-store" })
       .then((res) => res.json())
@@ -53,24 +189,27 @@ export function Results({ s, refresh, toast }: { s: GameState; refresh: () => vo
       <div className="lbl">Partita finita</div>
       <div className="mega">{w ? w.name : "Fine"}</div>
       <div className="box a">
-        <span className="lbl">{w?.kind === "HUNTER" ? "Vince il cercatore · tutti i fuggiaschi presi" : "Vince la coppia con più punti ancora in gioco"}</span>
+        <span className="lbl">{w?.kind === "HUNTER" ? "Vincono i cercatori · classifica individuale" : "Vincono i fuggiaschi · classifica a coppie"}</span>
       </div>
-      {r && (
-        <div className="cols2">
-          <div className="lb">
-            <span className="lbl">Cercatori</span>
-            {r.hunters.map((h, i) => (
-              <div key={h.id} className={h.id === s.me.id ? "me" : ""}><span>{i + 1}</span><span>{h.name}</span><span>{pts(h.stolen)}</span></div>
-            ))}
-          </div>
-          <div className="lb">
-            <span className="lbl">Coppie</span>
-            {r.pairs.map((p, i) => (
-              <div key={p.id} className={p.id === s.me.pairId ? "me" : ""}><span>{i + 1}</span><span>{p.name}{p.active === 0 ? " ✕" : ""}</span><span>{pts(p.pool)}</span></div>
-            ))}
-          </div>
-        </div>
-      )}
+      <button type="button" className="btn a replaybtn" onClick={() => setReplay(true)}>▶ Guarda il replay della serata</button>
+      {replay && <Replay onClose={() => setReplay(false)} />}
+      {r && (w?.kind === "HUNTER" ? (
+        <Podium
+          entries={[...r.hunters].sort((a, b) => b.stolen - a.stolen).map((h) => ({
+            key: h.id, mine: h.id === s.me.id, title: h.ghost ? `👻 ${h.name}` : h.name, sub: h.ghost ? "fantasma" : undefined, points: h.stolen,
+            faces: [<Avatar key={h.id} id={h.id} name={h.name} at={s.avatars[h.id]} size={44} kind={h.ghost ? "ghost" : "hunter"} />],
+          }))}
+        />
+      ) : (
+        <Podium
+          entries={r.pairs.map((p) => ({
+            key: p.id, mine: p.id === s.me.pairId, title: p.name, sub: p.members.map((m) => m.name).join(" & "), points: p.pool, out: p.active === 0,
+            faces: p.members.map((m) => <Avatar key={m.id} id={m.id} name={m.name} at={s.avatars[m.id]} size={36} />),
+          }))}
+        />
+      ))}
+      {r && <Standings s={s} />}
+      {r && <Graveyard fallen={r.fallen} meId={s.me.id} />}
       <div className="lbl">Album delle prove</div>
       {album == null && <span className="muted small">Carico…</span>}
       {album?.length === 0 && <span className="muted small">Nessuna prova caricata.</span>}
@@ -197,8 +336,24 @@ export function FugitiveHud({ s, now }: { s: GameState; now: number }) {
 
 export function Ghost({ s, now, refresh, toast }: { s: GameState; now: number; refresh: () => void; toast: Toast }) {
   const card = s.cards.find((c) => c.code === "SUSSURRO");
+  const zombie = s.cards.find((c) => c.code === "ZOMBIE" && c.state === "READY");
   const partner = s.fugitive?.partner;
   const [busy, setBusy] = useState(false);
+  const rise = async () => {
+    if (!zombie || !confirm("Usare la carta Zombie e tornare fuggiasco? Avrai una password nuova e 3 minuti di immunità.")) return;
+    setBusy(true);
+    try {
+      const r = await post<{ message: string }>("/api/cards", { cardId: zombie.id });
+      buzz([80, 60, 300]);
+      playSfx("start");
+      toast(r.message);
+      refresh();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
   const whisper = async () => {
     if (!card) return;
     setBusy(true);
@@ -217,13 +372,24 @@ export function Ghost({ s, now, refresh, toast }: { s: GameState; now: number; r
   const left = card?.cooldownUntil ? +new Date(card.cooldownUntil) - now : 0;
   return (
     <div className="pad">
+      <GhostIntro playerId={`${s.me.id}-r${s.game.round}`} />
       <PhaseTimer s={s} now={now} />
       <div className="box ghost">
+        <GhostLoop />
         <span className="lbl">Sei stato catturato</span>
         <div className="mega">Fantasma</div>
+        {s.ghostCapture && (
+          <div className="row"><span className="lbl">Punti rubati da fantasma</span><span className="big a num">{pts(s.ghostCapture.stolen)}</span></div>
+        )}
+        {zombie && (
+          <button type="button" className="btn zombiebtn" onClick={rise} disabled={busy}>
+            🧟 Risorgi con la carta Zombie
+          </button>
+        )}
         <p className="small muted">
-          Adesso giochi con i cercatori. Leggi e scrivi nel loro canale, e con il Sussurro riveli il settore di un fuggiasco a caso
-          (mai il tuo ex partner). Si ricarica ogni 10 minuti.
+          Adesso giochi con i cercatori: <b>catturi esattamente come loro</b>, con la password del fuggiasco (tranne il tuo ex
+          compagno), e i punti rubati sono tuoi. Leggi e scrivi nel loro canale, e con il Sussurro riveli il settore di un fuggiasco a
+          caso (mai il tuo ex partner). Si ricarica ogni 10 minuti.
         </p>
       </div>
       {card && (
@@ -293,10 +459,12 @@ type Verdict =
   | { result: "ALREADY"; targetName: string; capturedBy: string }
   | { result: "SHIELDED"; shieldLeftS: number }
   | { result: "LOCKED"; lockedS: number }
-  | { result: "PHASE"; phase: string };
+  | { result: "PHASE"; phase: string }
+  | { result: "PARTNER"; targetName: string };
 
 export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => void; toast: Toast }) {
-  const h = s.hunter!;
+  // Hunters and ghosts share this screen.
+  const h = s.hunter ?? s.ghostCapture ?? { attemptsLeft: 0, lockedS: 0 };
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [v, setV] = useState<Verdict | null>(null);
@@ -370,6 +538,7 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
             {v.result === "SHIELDED" && "GHOST SHIELD"}
             {v.result === "LOCKED" && "BLOCCATO"}
             {v.result === "PHASE" && "CATTURA NON APERTA"}
+            {v.result === "PARTNER" && "È IL TUO EX COMPAGNO"}
           </b>
           <span className="muted small">
             {v.result === "WRONG" && `Controlla con il fuggiasco come si scrive. ${v.attemptsLeft} tentativi prima del blocco di 60 s.`}
@@ -377,6 +546,7 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
             {v.result === "SHIELDED" && `Immune ancora per ${clock(v.shieldLeftS * 1000)}. Se lo scudo è partito dopo il tocco, contestate sul gruppo WhatsApp.`}
             {v.result === "LOCKED" && `Troppi errori. Riprova tra ${v.lockedS} s.`}
             {v.result === "PHASE" && "La cattura si apre quando finisce il vantaggio dei fuggiaschi."}
+            {v.result === "PARTNER" && `${v.targetName} era in coppia con te: un fantasma non può catturare il proprio ex compagno.`}
           </span>
         </div>
       )}
@@ -399,7 +569,7 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
 function cardStatus(c: Card, now: number) {
   if (c.state === "ACTIVE") return `${clock(+new Date(c.activeUntil!) - now)} rimasti`;
   if (c.state === "COOLDOWN") return `ricarica ${clock(+new Date(c.cooldownUntil!) - now)}`;
-  if (c.state === "LOCKED") return "si sblocca a caccia aperta";
+  if (c.state === "LOCKED") return c.code === "ZOMBIE" ? "si usa da fantasma, per risorgere" : "si sblocca a caccia aperta";
   if (c.state === "SPENT") return "usata";
   return c.usesLeft == null ? "usi illimitati" : `${c.usesLeft} ${c.usesLeft === 1 ? "uso" : "usi"}`;
 }
@@ -471,6 +641,9 @@ export function Deck({ s, now, refresh, toast }: { s: GameState; now: number; re
 
 /* ---------------- map tab ---------------- */
 
+/** Wall clock for the legend's "is the partner's fix old" check. */
+const clockNow = () => Date.now();
+
 export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; geoError: string | null }) {
   const g = s.game;
   const counts = useMemo(() => {
@@ -480,12 +653,49 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
   }, [s.hunter?.pings]);
   const points = useMemo<MapPoint[]>(() => {
     const p = s.fugitive?.partner;
-    return p && p.status === "ACTIVE" && p.lat != null && p.lng != null ? [{ id: "partner", lat: p.lat, lng: p.lng, kind: "partner", label: p.name }] : [];
+    return p && p.status === "ACTIVE" && p.lat != null && p.lng != null ? [{ id: "partner", lat: p.lat, lng: p.lng, kind: "partner", label: p.distanceM != null ? `${p.name} · ${p.distanceM} m` : p.name, fixAt: p.fixAt }] : [];
   }, [s.fugitive?.partner]);
+  const meLook = s.me.role === "HUNTER" ? "hunter" : s.me.status === "CAPTURED" ? "ghost" : "fugitive";
+  const [focus, setFocus] = useState<{ lng: number; lat: number; zoom: number; n: number } | null>(null);
+  const goTo = (t: LegendTarget) => setFocus((f) => ({ ...t, n: (f?.n ?? 0) + 1 }));
+
   const quests = useMemo(
-    () => (s.fugitive?.missions ?? []).map((m) => ({ id: m.id, lat: m.lat, lng: m.lng, title: m.place, points: m.points, done: m.proofId != null })),
+    () =>
+      (s.fugitive?.missions ?? []).filter((m) => !m.special).map((m) => ({
+        id: m.id, lat: m.lat, lng: m.lng, title: m.place, points: m.points, done: m.proofId != null,
+        radiusM: m.radiusM, flash: m.flashUntil != null, reward: m.reward ?? null, abandoned: !!m.abandoned,
+      })),
     [s.fugitive?.missions],
   );
+
+  // Where each legend symbol is right now (nearest one to you), for "Mostra sulla mappa".
+  const targets = useMemo<LegendTargets>(() => {
+    const out: LegendTargets = {};
+    const near = (a: { lat: number; lng: number }) => (fix ? (a.lat - fix.lat) ** 2 + ((a.lng - fix.lng) * 0.71) ** 2 : 0);
+    const kindOf = (q: (typeof quests)[number]) =>
+      q.done ? "done" : q.flash ? "flash" : q.reward === "ZOMBIE" ? "zombie" : q.reward ? "reward" : q.abandoned ? "abandoned" : "quest";
+    for (const q of [...quests].sort((a, b) => near(a) - near(b))) out[kindOf(q)] ??= { lat: q.lat, lng: q.lng, zoom: 17 };
+    if (fix) {
+      out.me = { lat: fix.lat, lng: fix.lng, zoom: 17 };
+      if (fix.acc > 12) out.acc = { lat: fix.lat, lng: fix.lng, zoom: 16.5 };
+    }
+    const p = points[0];
+    if (p) out[p.fixAt && clockNow() - Date.parse(p.fixAt) > 120_000 ? "partnerOld" : "partner"] = { lat: p.lat, lng: p.lng, zoom: 17 };
+    const zs = [...(s.hunter?.zones ?? [])].sort((a, b) => a.ageS - b.ageS);
+    const hot = zs.find((z) => z.ageS < 90), old = zs.findLast((z) => z.ageS >= 90);
+    if (hot) out.zoneHot = { lat: hot.lat, lng: hot.lng, zoom: 16 };
+    if (old) out.zoneOld = { lat: old.lat, lng: old.lng, zoom: 16 };
+    const sector = (id: string | undefined): LegendTarget | undefined => {
+      const c = id ? sectorCenter(g.boundary, id) : null;
+      return c ? { lng: c[0], lat: c[1], zoom: 15.5 } : undefined;
+    };
+    out.ping = sector(Object.keys(counts).find((k) => counts[k] > 0));
+    out.track = sector(s.hunter?.track?.sector);
+    const xs = g.boundary.map((b) => b[0]), ys = g.boundary.map((b) => b[1]);
+    out.boundary = out.sectors = { lng: (Math.min(...xs) + Math.max(...xs)) / 2, lat: (Math.min(...ys) + Math.max(...ys)) / 2, zoom: 14.3 };
+    for (const k of Object.keys(out) as (keyof LegendTargets)[]) if (!out[k]) delete out[k];
+    return out;
+  }, [quests, fix, points, s.hunter?.zones, s.hunter?.track?.sector, counts, g.boundary]);
 
   let edge: string | null = null;
   if (fix) {
@@ -495,7 +705,7 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
 
   return (
     <div className="mapfull">
-      <MapView boundary={g.boundary} fix={fix} points={points} quests={quests} zones={s.hunter?.zones ?? []} sectorCounts={counts} tracked={s.hunter?.track?.sector ?? null} />
+      <MapView boundary={g.boundary} fix={fix} points={points} quests={quests} zones={s.hunter?.zones ?? []} sectorCounts={counts} tracked={s.hunter?.track?.sector ?? null} meLook={meLook} focus={focus} />
       <div className="mapover top">
         {geoError && <div className="alert">{geoError}</div>}
         {edge && <div className="alert">{edge}</div>}
@@ -505,14 +715,7 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
         {s.hunter && s.game.phase === "HEAD_START" && <span className="chip glass">Le zone dei fuggiaschi compaiono a caccia aperta</span>}
       </div>
       <div className="mapover bottom">
-        <div className="legend glass">
-          <span><i className="sw" style={{ borderColor: "var(--accent)" }} />Confine</span>
-          {s.fugitive && <span><i className="sw" style={{ background: "var(--accent)", borderColor: "var(--accent)", borderRadius: "50%" }} />Missione</span>}
-          <span><i className="sw" style={{ background: "var(--fg)", borderRadius: "50%" }} />Tu</span>
-          {s.fugitive && <span><i className="sw" style={{ borderRadius: "50%" }} />Partner</span>}
-          {s.hunter && <span><i className="sw" style={{ borderColor: "#FF4D55", background: "rgba(229,9,20,.25)", borderRadius: "50%", borderStyle: "dashed" }} />Zona fuggiasco</span>}
-        {s.hunter && <span><i className="sw" style={{ borderColor: "var(--threat)", background: "repeating-linear-gradient(135deg,var(--threat) 0 2px,transparent 2px 5px)" }} />Ping</span>}
-        </div>
+        <MapLegend look={meLook} targets={targets} onFocus={goTo} />
       </div>
     </div>
   );
@@ -531,13 +734,172 @@ function pointIn(lng: number, lat: number, poly: [number, number][]) {
 
 const CH_LABEL = { HUNTERS: "Cercatori", FUGITIVES: "Fuggiaschi", BROADCAST: "Tutti" };
 
+function chatLabel(s: GameState, c: Channel) {
+  return c in CH_LABEL ? CH_LABEL[c as keyof typeof CH_LABEL] : s.groups.find((g) => g.channel === c)?.name ?? "Gruppo";
+}
+
+/** "Mara, Hugo e Anna" / "Mara, Hugo e altri 3": used when the group gets no name. */
+function autoName(names: string[]) {
+  if (names.length <= 3) return names.length > 1 ? `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]}` : names[0] ?? "";
+  return `${names.slice(0, 2).join(", ")} e altri ${names.length - 2}`;
+}
+
+/**
+ * New group or add people to one. Built for big games: search, team filter, sections
+ * (your partner, your team, the other team), picked people as removable chips on top,
+ * optional name, and the button always in reach.
+ */
+function GroupSheet({ s, group, onClose, onDone, toast }: {
+  s: GameState; group?: GameState["groups"][number]; onClose: () => void; onDone: (channel?: Channel) => void; toast: Toast;
+}) {
+  const [name, setName] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [query, setQuery] = useState("");
+  const [team, setTeam] = useState<"ALL" | "HUNTER" | "FUGITIVE">("ALL");
+  const [busy, setBusy] = useState(false);
+
+  const inGroup = new Set(group?.members.map((m) => m.id) ?? []);
+  const people = s.lobby.players.filter((p) => p.id !== s.me.id && !inGroup.has(p.id));
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const norm = (x: string) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const shown = people.filter((p) => (team === "ALL" || p.role === team) && norm(p.name).includes(norm(query.trim())));
+
+  const myRole = s.me.role;
+  const partner = shown.filter((p) => s.me.pairId && p.pairId === s.me.pairId);
+  const mine = shown.filter((p) => p.role === myRole && !partner.includes(p));
+  const others = shown.filter((p) => p.role !== myRole);
+  const teamName = (r: string | null) => (r === "HUNTER" ? "Cercatori" : r === "FUGITIVE" ? "Fuggiaschi" : "Senza ruolo");
+  const sections = [
+    { key: "partner", title: "Il tuo compagno", list: partner },
+    { key: "mine", title: myRole ? `La tua squadra · ${teamName(myRole)}` : "Giocatori", list: mine },
+    { key: "others", title: myRole ? `Squadra avversaria · ${teamName(myRole === "HUNTER" ? "FUGITIVE" : "HUNTER")}` : "Altri", list: others },
+  ].filter((x) => x.list.length);
+
+  const toggle = (id: string) => setPicked((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
+  const toggleAll = (ids: string[]) =>
+    setPicked((x) => (ids.every((id) => x.includes(id)) ? x.filter((y) => !ids.includes(y)) : [...new Set([...x, ...ids])]));
+
+  const pickedPeople = picked.map((id) => byId.get(id)).filter((p): p is NonNullable<typeof p> => !!p);
+  const mixed = new Set([myRole, ...pickedPeople.map((p) => p.role)].filter(Boolean)).size > 1;
+  const suggested = autoName([s.me.name, ...pickedPeople.map((p) => p.name)]);
+  // Cut by characters, not UTF-16 units, so an emoji typed in the name is never split.
+  const finalName = Array.from(name.trim() || suggested).slice(0, 30).join("");
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const r = await post<{ channel?: Channel }>("/api/groups", group ? { action: "add", channel: group.channel, members: picked } : { action: "create", name: finalName, members: picked });
+      toast(group ? `Aggiunt${picked.length === 1 ? "o" : "i"} a ${group.name}.` : `Gruppo "${finalName}" creato.`);
+      onDone(r.channel);
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const counts = { ALL: people.length, HUNTER: people.filter((p) => p.role === "HUNTER").length, FUGITIVE: people.filter((p) => p.role === "FUGITIVE").length };
+
+  return (
+    <Sheet title={group ? `Aggiungi a ${group.name}` : "Nuovo gruppo"} onClose={onClose}>
+      {pickedPeople.length > 0 && (
+        <div className="pickedrow" aria-label="Persone scelte">
+          {!group && (
+            <span className="picked me">
+              <Avatar id={s.me.id} name={s.me.name} at={s.avatars[s.me.id]} size={44} kind={myRole === "HUNTER" ? "hunter" : "fugitive"} />
+              <small>Tu</small>
+            </span>
+          )}
+          {pickedPeople.map((p) => (
+            <button type="button" key={p.id} className="picked" onClick={() => toggle(p.id)} aria-label={`Togli ${p.name}`}>
+              <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={44} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
+              <span className="x" aria-hidden="true">✕</span>
+              <small>{p.name}</small>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {people.length === 0 ? (
+        <p className="muted small">Non c&apos;è nessun altro da aggiungere.</p>
+      ) : (
+        <>
+          {people.length > 6 && (
+            <input className="input search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Cerca tra ${people.length} giocatori`} />
+          )}
+          <div className="seg filterseg" role="radiogroup" aria-label="Squadra">
+            {(["ALL", "HUNTER", "FUGITIVE"] as const).map((t) => (
+              <button type="button" key={t} role="radio" aria-checked={team === t} className={team === t ? "on" : ""} onClick={() => setTeam(t)}>
+                {t === "ALL" ? "Tutti" : teamName(t)} <span className="n">{counts[t]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="picklist">
+            {sections.length === 0 && <p className="muted small">Nessuno con questo nome.</p>}
+            {sections.map((sec) => {
+              const ids = sec.list.map((p) => p.id);
+              const all = ids.every((id) => picked.includes(id));
+              return (
+                <section key={sec.key} className="picksec">
+                  <div className="pickhead">
+                    <span className="lbl">{sec.title}</span>
+                    {ids.length > 1 && <button type="button" className="linkbtn" onClick={() => toggleAll(ids)}>{all ? "Togli tutti" : "Scegli tutti"}</button>}
+                  </div>
+                  {sec.list.map((p) => {
+                    const on = picked.includes(p.id);
+                    return (
+                      <button type="button" key={p.id} className={`pick ${on ? "on" : ""}`} onClick={() => toggle(p.id)} aria-pressed={on}>
+                        <span className="avwrap">
+                          <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={38} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
+                          {on && <span className="badge" aria-hidden="true">✓</span>}
+                        </span>
+                        <span className="who">
+                          <b>{p.name}</b>
+                          <small>{p.spectator ? "Spettatore" : p.role === "HUNTER" ? "Cercatore" : p.role === "FUGITIVE" ? "Fuggiasco" : "Senza ruolo"}</small>
+                        </span>
+                        <span className={`radio ${on ? "on" : ""}`} aria-hidden="true" />
+                      </button>
+                    );
+                  })}
+                </section>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      <div className="sheetfoot">
+        {!group && (
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={pickedPeople.length ? suggested : "Nome del gruppo (facoltativo)"} maxLength={30} enterKeyHint="done" />
+        )}
+        {mixed && <p className="mixwarn">Nel gruppo ci sono cercatori e fuggiaschi: tutti leggono tutto.</p>}
+        <button type="button" className="btn a" disabled={busy || !picked.length} onClick={submit}>
+          {busy ? "Un attimo…" : !picked.length ? "Scegli almeno una persona" : group ? `Aggiungi ${picked.length === 1 ? pickedPeople[0]?.name : `${picked.length} persone`}` : `Crea "${finalName}" · ${picked.length + 1}`}
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
 export function Comms({ s, messages, refresh, toast }: { s: GameState; messages: Message[]; refresh: () => void; toast: Toast }) {
-  const [ch, setCh] = useState<Message["channel"]>(s.channels[0]);
+  const [ch, setCh] = useState<Channel>(s.channels[0]);
+  const [sheet, setSheet] = useState<"new" | "add" | null>(null);
   const [text, setText] = useState("");
   const channel = s.channels.includes(ch) ? ch : s.channels[0];
   const list = messages.filter((m) => m.channel === channel);
   const phase = s.game.phase;
   const canWrite = channel !== "BROADCAST" || phase === "LOBBY" || phase === "ENDED";
+  const group = s.groups.find((g) => g.channel === channel);
+  const leave = async () => {
+    if (!group || !confirm(`Uscire da "${group.name}"?`)) return;
+    try {
+      await post("/api/groups", { action: "leave", channel: group.channel });
+      setCh(s.channels[0]);
+      refresh();
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
 
   const scroller = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<number | null>(null);
@@ -589,10 +951,30 @@ export function Comms({ s, messages, refresh, toast }: { s: GameState; messages:
 
   return (
     <div className="chat">
-      {s.channels.length > 1 && (
-        <div className="tabs seg glass">
-          {s.channels.map((c) => <button type="button" key={c} className={c === channel ? "on" : ""} onClick={() => setCh(c)}>{CH_LABEL[c]}</button>)}
+      <FlameDither className="chatbg" />
+      <div className="chatbar">
+        {s.channels.map((c) => (
+          <button type="button" key={c} className={`chatchip glass ${c === channel ? "on" : ""} ${c.startsWith("G") ? "grp" : ""}`} onClick={() => setCh(c)}>
+            {chatLabel(s, c)}
+          </button>
+        ))}
+        <button type="button" className="chatchip glass add" onClick={() => setSheet("new")} aria-label="Nuovo gruppo">＋ Gruppo</button>
+      </div>
+      {group && (
+        <div className="groupbar glass">
+          <span className="members">{group.members.map((m) => (m.id === s.me.id ? "Tu" : m.name)).join(", ")}</span>
+          <button type="button" className="btn sm" onClick={() => setSheet("add")}>Aggiungi</button>
+          <button type="button" className="btn sm ghostbtn" onClick={leave}>Esci</button>
         </div>
+      )}
+      {sheet && (
+        <GroupSheet
+          s={s}
+          group={sheet === "add" ? group : undefined}
+          onClose={() => setSheet(null)}
+          onDone={(c) => { setSheet(null); if (c) setCh(c); refresh(); }}
+          toast={toast}
+        />
       )}
       <div className="msgs" ref={scroller}>
         {list.length === 0 && <p className="muted small">Ancora nessun messaggio.</p>}
@@ -603,7 +985,7 @@ export function Comms({ s, messages, refresh, toast }: { s: GameState; messages:
               {m.kind !== "SYSTEM" && !m.mine && <span className="meta">{m.sender} · {new Date(m.at).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}</span>}
               {m.audio && !m.deleted ? (
                 <span className="text voicewrap">
-                  <VoiceBubble id={m.id} ms={m.audio_ms} />
+                  <VoiceBubble id={m.id} ms={m.audio_ms} radio={m.radio} />
                   {canDelete && (
                     <button type="button" className="msgmore" onClick={() => setMenu(menu === m.id ? null : m.id)} aria-label="Opzioni messaggio" aria-haspopup="menu" aria-expanded={menu === m.id}>
                       •••
@@ -661,7 +1043,7 @@ export function Comms({ s, messages, refresh, toast }: { s: GameState; messages:
           </div>
         ) : (
         <form className="composer glass" onSubmit={send}>
-          <input id="chat-text" className="input" value={text} onChange={(e) => onType(e.target.value)} placeholder={channel === "BROADCAST" ? "Scrivi a tutti" : `Scrivi ai ${CH_LABEL[channel].toLowerCase()}`} maxLength={500} />
+          <input id="chat-text" className="input" value={text} onChange={(e) => onType(e.target.value)} placeholder={channel === "BROADCAST" ? "Scrivi a tutti" : group ? `Scrivi in ${group.name}` : `Scrivi ai ${chatLabel(s, channel).toLowerCase()}`} maxLength={500} />
           {text.trim() || !micOk ? (
             <button type="submit" className="btn a sm">Invia</button>
           ) : (

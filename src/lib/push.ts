@@ -8,7 +8,7 @@ function configure() {
   const pub = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
   const priv = process.env.VAPID_PRIVATE_KEY;
   if (!pub || !priv) return false;
-  webpush.setVapidDetails(process.env.VAPID_SUBJECT || "https://cirenaica-night-hunt.vercel.app", pub, priv);
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || "https://nighthunt.vercel.app", pub, priv);
   configured = true;
   return true;
 }

@@ -1,4 +1,18 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "redirects": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "cirenaica-night-hunt.vercel.app" }],
+      "destination": "https://nighthunt.vercel.app/",
+      "permanent": true
+    },
+    {
+      "source": "/:path+",
+      "has": [{ "type": "host", "value": "cirenaica-night-hunt.vercel.app" }],
+      "destination": "https://nighthunt.vercel.app/:path+",
+      "permanent": true
+    }
+  ]
 }

@@ -1,7 +1,10 @@
 "use client";
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
+import { DotLottieReact, setWasmUrl } from "@lottiefiles/dotlottie-react";
 import type { Card } from "./types";
 import { CARD_INFO, clock } from "./util";
+
+setWasmUrl("/lottie/dotlottie-player.wasm");
 
 /*
   Trading-card look for the deck: faction frame, name bar, art window, type line, ability box,
@@ -9,10 +12,14 @@ import { CARD_INFO, clock } from "./util";
   Art is loaded from /cards/<code>.webp (generated with Gemini); a vector emblem is drawn until it exists.
 */
 
-type Faction = "FUGITIVE" | "HUNTER" | "GHOST";
+type Faction = "FUGITIVE" | "HUNTER" | "GHOST" | "ANY";
 type Rarity = "comune" | "non comune" | "rara";
 
-interface Meta { faction: Faction; type: string; ability: string; flavor: string; rarity: Rarity; no: number; file: string }
+interface Meta {
+  faction: Faction; type: string; ability: string; flavor: string; rarity: Rarity; no: number; file: string;
+  /** Animated art (dotLottie in /public/animations) shown over the night-sky backdrop instead of a picture. */
+  lottie?: string;
+}
 
 export const CARD_META: Record<Card["code"], Meta> = {
   GHOST_SHIELD: { faction: "FUGITIVE", type: "Difesa", ability: "Velo Spettrale", flavor: "Le mani dei cercatori lo attraversano come nebbia d'ottobre.", rarity: "rara", no: 1, file: "ghost_shield" },
@@ -21,9 +28,13 @@ export const CARD_META: Record<Card["code"], Meta> = {
   RADAR_PING: { faction: "HUNTER", type: "Ricerca", ability: "Sonar del Pipistrello", flavor: "Ogni battito d'ali torna indietro con un nome.", rarity: "comune", no: 4, file: "radar_ping" },
   TRACCIA: { faction: "HUNTER", type: "Inseguimento", ability: "Impronte Fresche", flavor: "Il selciato bagnato ricorda ogni passo.", rarity: "non comune", no: 5, file: "traccia" },
   SUSSURRO: { faction: "GHOST", type: "Spionaggio", ability: "Voce dall'Aldilà", flavor: "I morti non tradiscono. Sussurrano soltanto.", rarity: "rara", no: 6, file: "sussurro" },
+  ZOMBIE: { faction: "GHOST", type: "Resurrezione", ability: "Ritorno dalla Tomba", flavor: "La terra del cimitero non tiene chi ha ancora una partita da vincere.", rarity: "rara", no: 7, file: "zombie", lottie: "/animations/zombie-card.lottie" },
+  JUMPSCARE: { faction: "ANY", type: "Scherzo", ability: "Dietro di Te", flavor: "Ad Halloween non si scappa: prima o poi il telefono lo guardi.", rarity: "non comune", no: 8, file: "jumpscare" },
 };
 
-const FACTION_LABEL: Record<Faction, string> = { FUGITIVE: "Fuggiasco", HUNTER: "Cercatore", GHOST: "Fantasma" };
+const SET_SIZE = String(Object.keys(CARD_META).length).padStart(3, "0");
+
+const FACTION_LABEL: Record<Faction, string> = { FUGITIVE: "Fuggiasco", HUNTER: "Cercatore", GHOST: "Fantasma", ANY: "Tutti" };
 const RARITY_MARK: Record<Rarity, string> = { comune: "●", "non comune": "◆", rara: "★" };
 const STATE_LABEL = { READY: "Pronta", ACTIVE: "Attiva", COOLDOWN: "Ricarica", SPENT: "Usata", LOCKED: "Bloccata" } as const;
 
@@ -33,7 +44,7 @@ function mins(s: number) {
 }
 
 /** Placeholder art: night sky, rooftops and a faction emblem. */
-function Emblem({ code }: { code: Card["code"] }) {
+function Emblem({ code, bare }: { code: Card["code"]; bare?: boolean }) {
   const glyph: Record<Card["code"], React.ReactNode> = {
     GHOST_SHIELD: (
       <g>
@@ -58,18 +69,51 @@ function Emblem({ code }: { code: Card["code"] }) {
     ),
     TRACCIA: <g><ellipse cx="42" cy="76" rx="7" ry="10" /><ellipse cx="62" cy="58" rx="7" ry="10" /><ellipse cx="80" cy="40" rx="7" ry="10" /><circle cx="60" cy="56" r="34" fill="none" strokeWidth="3" /><path d="M60 16v14M60 82v14M20 56h14M86 56h14" strokeWidth="3" /></g>,
     SUSSURRO: <g><path d="M40 30c-10 0-16 8-16 18v34l6-4 6 4 6-4 6 4V48c0-10-6-18-14-18z" /><path d="M62 46c8 0 14 4 22 4M62 56c10 0 18 2 30 0M62 66c8 0 14-2 22-4" strokeWidth="4" fill="none" strokeLinecap="round" /></g>,
+    // A face lunging out of the dark: hollow eyes, jagged grin.
+    JUMPSCARE: (
+      <g>
+        <path d="M60 14c-22 0-34 16-34 36 0 14 6 26 16 32l4 8h28l4-8c10-6 16-18 16-32 0-20-12-36-34-36z" />
+        <path d="M43 44l12 6-12 6zM77 44l-12 6 12 6z" className="eye" />
+        <path d="M44 68l6 6 5-6 5 6 5-6 5 6 6-6" fill="none" strokeWidth="3.5" strokeLinejoin="round" className="eye-line" />
+      </g>
+    ),
+    // A hand clawing out of a grave mound, tombstone behind.
+    ZOMBIE: (
+      <g>
+        <path d="M70 20h22a8 8 0 018 8v38H62V28a8 8 0 018-8z" opacity=".55" />
+        <path d="M18 84c6-10 18-14 42-14s36 4 42 14z" />
+        <path d="M44 74V48l-4-14 5-2 4 12 1-16h5l1 16 3-14 5 1-3 16 6-10 4 3-8 15v17z" />
+      </g>
+    ),
   };
   return (
     <svg viewBox="0 0 120 90" className="tcg-emblem" aria-hidden="true">
       <circle cx="96" cy="18" r="9" className="moon" />
       <path d="M0 90V70l10-6 8 4V58l12-8 10 8v8l10-4 8 6V60l14-10 14 10v10l10-6 12 8V90z" className="roofs" />
-      <g className="glyph">{glyph[code]}</g>
+      {!bare && <g className="glyph">{glyph[code]}</g>}
     </svg>
   );
 }
 
+const reducedQuery = "(prefers-reduced-motion: reduce)";
+const onReducedChange = (cb: () => void) => {
+  const m = window.matchMedia(reducedQuery);
+  m.addEventListener("change", cb);
+  return () => m.removeEventListener("change", cb);
+};
+
 function Art({ code }: { code: Card["code"] }) {
   const [failed, setFailed] = useState(false);
+  const reduced = useSyncExternalStore(onReducedChange, () => window.matchMedia(reducedQuery).matches, () => true);
+  const anim = CARD_META[code].lottie;
+  if (anim) {
+    return (
+      <div className="tcg-anim">
+        <Emblem code={code} bare />
+        <DotLottieReact src={anim} loop autoplay={!reduced} className="tcg-lottie" />
+      </div>
+    );
+  }
   if (failed) return <Emblem code={code} />;
   return (
     // eslint-disable-next-line @next/next/no-img-element
@@ -144,7 +188,7 @@ export function TcgCard({ card, now, size = "small", onClick, selected }: {
         )}
         <div className="tcg-foot">
           <span>Cirenaica Night Hunt · 2026</span>
-          <span>{String(meta.no).padStart(3, "0")}/006 {RARITY_MARK[meta.rarity]}</span>
+          <span>{String(meta.no).padStart(3, "0")}/{SET_SIZE} {RARITY_MARK[meta.rarity]}</span>
         </div>
       </div>
       <i className="tcg-foil" aria-hidden="true" />

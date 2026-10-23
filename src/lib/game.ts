@@ -2,10 +2,10 @@ import type { PoolClient } from "pg";
 import { randomInt, randomUUID } from "node:crypto";
 import { del as delBlob, put as putBlob } from "@vercel/blob";
 import { q, tx } from "./db";
-import { CARDS, cardState, type CardCode, type CardRow } from "./cards";
+import { CARDS, cardState, KEEP_ON_CAPTURE, ZOMBIE_SHIELD_S, type CardCode, type CardRow } from "./cards";
 import {
   CAPTURE_BOUNTY, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_OPTIONS, HOST_STALE_MIN, LIVE_OPTIONS,
-  missionsFor, PAIR_NAMES, PASSWORD_WORDS, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
+  allMissionsFor, missionsFor, SPECIAL_MISSIONS, type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
 import { bearing, compass, distanceM, inPolygon, neighbours, sectorOf, sectorPolygons } from "./geo";
@@ -21,6 +21,9 @@ export interface GameRow {
   drawn_at: Date | null;
   started_at: Date | null;
   live_at: Date | null;
+  roles_at: Date | null;
+  /** Hunters to draw; 0 = automatic (about one in five). */
+  hunters_n: number;
   ends_at: Date | null;
   ended_at: Date | null;
   winner_kind: "HUNTER" | "PAIR" | null;
@@ -51,6 +54,8 @@ export interface PlayerRow {
   out_since: Date | null;
   out_reported: boolean;
   last_seen: Date | null;
+  away: boolean;
+  partner_pick: string | null;
   spectator: boolean;
 }
 
@@ -58,8 +63,8 @@ export class GameError extends Error {}
 
 const FRESH_FIX_MS = 10 * 60_000;
 const STARTING_HAND: Record<Role, { code: CardCode; uses: number | null }[]> = {
-  FUGITIVE: [{ code: "GHOST_SHIELD", uses: 1 }, { code: "NEBBIA", uses: 2 }, { code: "ECO", uses: 1 }],
-  HUNTER: [{ code: "RADAR_PING", uses: null }, { code: "TRACCIA", uses: 1 }],
+  FUGITIVE: [{ code: "GHOST_SHIELD", uses: 1 }, { code: "NEBBIA", uses: 2 }, { code: "ECO", uses: 1 }, { code: "JUMPSCARE", uses: 1 }],
+  HUNTER: [{ code: "RADAR_PING", uses: null }, { code: "TRACCIA", uses: 1 }, { code: "JUMPSCARE", uses: 1 }],
 };
 
 export function normalize(s: string) {
@@ -125,12 +130,15 @@ async function endGame(gid: number, at: Date) {
 }
 
 export async function hunterTotals(c: Db | null, gid: number) {
-  return rows<{ id: string; name: string; stolen: number; last_at: Date | null }>(
+  return rows<{ id: string; name: string; ghost: boolean; stolen: number; last_at: Date | null }>(
     c,
-    `select p.id, p.name, coalesce(sum(l.hunter_delta), 0)::int as stolen,
+    // Hunters, plus ghosts once they've scored a capture.
+    `select p.id, p.name, p.role = 'FUGITIVE' as ghost, coalesce(sum(l.hunter_delta), 0)::int as stolen,
             max(l.at) filter (where l.hunter_delta > 0) as last_at
        from players p left join ledger l on l.hunter_id = p.id
-      where p.role = 'HUNTER' and p.game_id = $1 and not p.spectator group by p.id, p.name
+      where p.game_id = $1 and not p.spectator and (p.role = 'HUNTER' or (p.role = 'FUGITIVE' and p.status = 'CAPTURED'))
+      group by p.id, p.name, p.role
+     having p.role = 'HUNTER' or coalesce(sum(l.hunter_delta), 0) > 0
       order by stolen desc, last_at asc nulls last, p.name`,
     [gid],
   );
@@ -161,7 +169,7 @@ async function resolveWinner(c: Db, gid: number): Promise<{ kind: "HUNTER" | "PA
   return { kind: "PAIR", id: pairs[0].id };
 }
 
-export async function sysMsg(c: Db, gid: number, channel: "HUNTERS" | "FUGITIVES" | "BROADCAST", body: string, proofId: number | null = null) {
+export async function sysMsg(c: Db, gid: number, channel: string, body: string, proofId: number | null = null) {
   await c.query("insert into messages (game_id, channel, kind, body, proof_id) values ($1, $2, 'SYSTEM', $3, $4)", [gid, channel, body, proofId]);
 }
 
@@ -170,12 +178,14 @@ const ALERT_TITLE: Record<string, string> = {
   PARTNER_DOWN: "Partner catturato",
   PINGED: "Radar ping!",
   REVEALED: "Un fantasma ti ha visto",
+  JUMPSCARE: "👁️ C'è qualcuno dietro di te",
   INFO: "Night Hunt",
 };
 
-async function alert(c: Db, playerId: string, kind: string, body: string) {
+/** In-app alert plus push. `pushBody` replaces the text on the lock screen (e.g. not to spoil a jumpscare). */
+async function alert(c: Db, playerId: string, kind: string, body: string, pushBody = body) {
   await c.query("insert into alerts (player_id, kind, body) values ($1, $2, $3)", [playerId, kind, body]);
-  notify([playerId], ALERT_TITLE[kind] ?? "Night Hunt", body, kind);
+  notify([playerId], ALERT_TITLE[kind] ?? "Night Hunt", pushBody, kind);
 }
 
 const fmt = (n: number) => n.toLocaleString("it-IT");
@@ -261,15 +271,15 @@ export async function findGameByCode(raw: string) {
 }
 
 /** Validates a player's name and role; returns the cleaned name. */
-export function checkPlayer(name: string, role: string) {
+/** Roles aren't chosen any more: they're drawn by the host in the lobby. */
+export function checkPlayer(name: string) {
   const clean = name.trim().replace(/\s+/g, " ").slice(0, 20);
   if (clean.length < 2) throw new GameError("Scrivi un nome di almeno 2 lettere.");
-  if (role !== "HUNTER" && role !== "FUGITIVE") throw new GameError("Scegli se sei cercatore o fuggiasco.");
   return clean;
 }
 
-export async function joinGame(gameCode: string, name: string, role: string) {
-  const clean = checkPlayer(name, role);
+export async function joinGame(gameCode: string, name: string) {
+  const clean = checkPlayer(name);
   const game = await findGameByCode(gameCode);
   const gid = game.id;
   return tx(async (c) => {
@@ -279,6 +289,8 @@ export async function joinGame(gameCode: string, name: string, role: string) {
     const taken = await c.query("select 1 from players where game_id = $1 and name_key = $2", [gid, clean.toLowerCase()]);
     if (taken.rowCount) throw new GameError(`C'è già un giocatore chiamato ${clean}. Se sei tu, rientra con il codice.`);
     if (phase === "LOBBY") await invalidateDraw(c, gid);
+    // Roles already drawn: whoever arrives late joins the fugitives (no redraw needed).
+    const role = phase === "LOBBY" && (await getGame(c, gid)).roles_at ? "FUGITIVE" : null;
     const id = `p_${code(8).toLowerCase()}`;
     let rejoin = code(4);
     while ((await c.query("select 1 from players where rejoin_code = $1", [rejoin])).rowCount) rejoin = code(4);
@@ -297,13 +309,44 @@ export async function findByRejoinCode(raw: string) {
   return p;
 }
 
-export async function setRole(me: PlayerRow, role: string) {
-  if (role !== "HUNTER" && role !== "FUGITIVE") throw new GameError("Ruolo non valido.");
+/** Hunters to draw for n players: the host's choice, or about one in five (at least 1, always leaving 2 fugitives). */
+export function huntersFor(n: number, wanted: number) {
+  const auto = Math.max(1, Math.round(n / 5));
+  return Math.max(1, Math.min(wanted > 0 ? wanted : auto, n - 2));
+}
+
+/** Host draws the roles at random. Partner choices and any drawn pairs start over. */
+export async function drawRoles(me: PlayerRow) {
+  const gid = me.game_id;
   await tx(async (c) => {
-    await requireLobby(c, me.game_id);
-    if (me.role === role) return;
+    const g = await requireLobby(c, gid);
+    await requireHost(c, me);
+    const ps = (await c.query<PlayerRow>("select * from players where game_id = $1 and not spectator for update", [gid])).rows;
+    if (ps.length < 3) throw new GameError("Servono almeno 3 giocatori: 1 cercatore e 2 fuggiaschi.");
+    const n = huntersFor(ps.length, g.hunters_n);
+    const order = shuffle(ps);
+    const hunters = order.slice(0, n);
+    await c.query("update players set role = 'FUGITIVE', partner_pick = null, pair_id = null, password = null where game_id = $1 and not spectator", [gid]);
+    await c.query("update players set role = 'HUNTER' where id = any($1)", [hunters.map((h) => h.id)]);
+    await c.query("delete from pairs where game_id = $1", [gid]);
+    await c.query("update game set roles_at = now(), drawn_at = null where id = $1", [gid]);
+    await sysMsg(c, gid, "BROADCAST", `Ruoli estratti. ${n === 1 ? "Cercatore" : "Cercatori"}: ${hunters.map((h) => h.name).join(", ")}. Tutti gli altri scappano: sceglietevi il compagno.`);
+  });
+}
+
+/** A fugitive picks (or clears) the partner they want. Two players who pick each other are a pair. */
+export async function pickPartner(me: PlayerRow, partnerId: string | null) {
+  await tx(async (c) => {
+    const g = await requireLobby(c, me.game_id);
+    if (!g.roles_at) throw new GameError("Prima l'organizzatore estrae i ruoli.");
+    if (me.role !== "FUGITIVE") throw new GameError("Il compagno lo scelgono solo i fuggiaschi.");
+    if (partnerId) {
+      if (partnerId === me.id) throw new GameError("Non puoi fare coppia con te stesso.");
+      const [p] = (await c.query<PlayerRow>("select * from players where id = $1 and game_id = $2", [partnerId, me.game_id])).rows;
+      if (!p || p.role !== "FUGITIVE" || p.spectator) throw new GameError("Puoi scegliere solo un altro fuggiasco.");
+    }
     await invalidateDraw(c, me.game_id);
-    await c.query("update players set role = $1 where id = $2", [role, me.id]);
+    await c.query("update players set partner_pick = $1 where id = $2", [partnerId, me.id]);
   });
 }
 
@@ -334,7 +377,7 @@ export async function removePlayer(me: PlayerRow, playerId: string) {
 }
 
 /** Host settings, editable in the lobby: hunt length, head start, zone circle and kind of missions. */
-export async function updateSettings(me: PlayerRow, b: { liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string }) {
+export async function updateSettings(me: PlayerRow, b: { liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string; huntersN?: number }) {
   await tx(async (c) => {
     await requireLobby(c, me.game_id);
     await requireHost(c, me);
@@ -343,7 +386,8 @@ export async function updateSettings(me: PlayerRow, b: { liveMin?: number; headS
     const head = b.headStartMin != null && HEAD_START_OPTIONS.includes(Number(b.headStartMin)) ? Number(b.headStartMin) : g.head_start_min;
     const radius = b.zoneRadiusM != null && RADIUS_OPTIONS.includes(Number(b.zoneRadiusM)) ? Number(b.zoneRadiusM) : g.zone_radius_m;
     const mode = b.missionsMode === "abbandonati" || b.missionsMode === "chill" ? b.missionsMode : g.missions_mode;
-    await c.query("update game set live_min = $1, head_start_min = $2, zone_radius_m = $3, missions_mode = $4 where id = $5", [live, head, radius, mode, g.id]);
+    const huntersN = b.huntersN != null && Number.isInteger(Number(b.huntersN)) && Number(b.huntersN) >= 0 && Number(b.huntersN) <= 50 ? Number(b.huntersN) : g.hunters_n;
+    await c.query("update game set live_min = $1, head_start_min = $2, zone_radius_m = $3, missions_mode = $4, hunters_n = $5 where id = $6", [live, head, radius, mode, huntersN, g.id]);
   });
 }
 
@@ -397,26 +441,46 @@ export async function drawPairs(me: PlayerRow) {
     await c.query("select id from game where id = $1 for update", [gid]);
     const fugitives = (await c.query<PlayerRow>("select * from players where role = 'FUGITIVE' and game_id = $1 for update", [gid])).rows;
     const hunters = (await c.query("select 1 from players where role = 'HUNTER' and game_id = $1", [gid])).rowCount ?? 0;
-    if (hunters < 1) throw new GameError("Serve almeno un cercatore.");
-    if (fugitives.length < 2 || fugitives.length % 2) throw new GameError(`I fuggiaschi devono essere in numero pari (ora sono ${fugitives.length}).`);
+    if (!(await getGame(c, gid)).roles_at) throw new GameError("Prima estrai i ruoli.");
+    if (hunters < 1) throw new GameError("Serve almeno un cercatore: rifai l'estrazione dei ruoli.");
+    if (fugitives.length < 2) throw new GameError("Servono almeno 2 fuggiaschi.");
 
     await c.query("update players set pair_id = null, password = null where game_id = $1", [gid]);
     await c.query("delete from pairs where game_id = $1", [gid]);
-    const order = shuffle(fugitives);
+    // Pairs that chose each other stay together; everyone else is drawn at random.
+    const byId = new Map(fugitives.map((f) => [f.id, f]));
+    const chosen: PlayerRow[] = [];
+    const taken = new Set<string>();
+    for (const f of fugitives) {
+      const other = f.partner_pick ? byId.get(f.partner_pick) : undefined;
+      if (other && other.partner_pick === f.id && !taken.has(f.id) && !taken.has(other.id)) {
+        chosen.push(f, other);
+        taken.add(f.id).add(other.id);
+      }
+    }
+    const order = [...chosen, ...shuffle(fugitives.filter((f) => !taken.has(f.id)))];
     const names = shuffle(PAIR_NAMES);
-    const words = shuffle(PASSWORD_WORDS);
+    // No player limit: names get a number once the list runs out, passwords are drawn until unique.
+    const nameFor = (i: number) => (i < names.length ? names[i] : `${names[i % names.length]} ${Math.floor(i / names.length) + 1}`);
+    const used = new Set<string>();
+    const password = () => {
+      for (let tries = 0; ; tries++) {
+        // Two digits while there's room, then four (16 words x 9000 numbers).
+        const pw = PASSWORD_WORDS[randomInt(PASSWORD_WORDS.length)] + String(tries < 50 ? randomInt(10, 100) : randomInt(1000, 10000));
+        if (!used.has(pw)) return used.add(pw), pw;
+      }
+    };
     const lines: string[] = [];
-    for (let i = 0; i < order.length / 2; i++) {
+    // Odd count: the last one drawn plays alone and keeps the whole pool.
+    const pairCount = Math.ceil(order.length / 2);
+    for (let i = 0; i < pairCount; i++) {
       // Pair ids are unique across games, so upload folders and proofs never collide.
       const pid = `G${gid}P${i + 1}`;
-      const pname = names[i % names.length];
+      const members = order.slice(i * 2, i * 2 + 2);
+      const pname = members.length === 1 ? SOLO_NAME : nameFor(i);
       await c.query("insert into pairs (id, game_id, name) values ($1, $2, $3)", [pid, gid, pname]);
-      for (const k of [0, 1]) {
-        const pl = order[i * 2 + k];
-        const pw = words[(i * 2 + k) % words.length] + String(randomInt(10, 100));
-        await c.query("update players set pair_id = $1, password = $2 where id = $3", [pid, pw, pl.id]);
-      }
-      lines.push(`${pname}: ${order[i * 2].name} + ${order[i * 2 + 1].name}`);
+      for (const pl of members) await c.query("update players set pair_id = $1, password = $2 where id = $3", [pid, password(), pl.id]);
+      lines.push(`${pname}: ${members.map((m) => m.name).join(" + ")}`);
     }
     await c.query("update game set drawn_at = now() where id = $1", [gid]);
     await sysMsg(c, gid, "BROADCAST", `Coppie estratte. ${lines.join(" · ")}`);
@@ -432,6 +496,8 @@ async function clearRound(c: Db, gid: number, alsoChat: boolean) {
   await c.query(`delete from capture_attempts where hunter_id in ${inGame}`, [gid]);
   await c.query(`delete from alerts where player_id in ${inGame}`, [gid]);
   await c.query("delete from pings where game_id = $1", [gid]);
+  await c.query("delete from tracks where game_id = $1", [gid]);
+  await c.query("delete from sos where game_id = $1", [gid]);
   if (alsoChat) {
     await c.query("delete from messages where game_id = $1", [gid]);
     await c.query("delete from flash_slots where game_id = $1", [gid]);
@@ -474,10 +540,11 @@ export async function newRound(me: PlayerRow) {
     await requireHost(c, me);
     if (phaseOf(g) !== "ENDED") throw new GameError("Si può ricominciare solo a partita finita.");
     await clearRound(c, gid, true);
-    await c.query("update players set pair_id = null, password = null, status = 'ACTIVE', captured_by = null, captured_at = null, spectator = false where game_id = $1", [gid]);
+    // New round: roles and partners are drawn and chosen again.
+    await c.query("update players set role = null, partner_pick = null, pair_id = null, password = null, status = 'ACTIVE', captured_by = null, captured_at = null, spectator = false where game_id = $1", [gid]);
     await c.query("delete from pairs where game_id = $1", [gid]);
     await c.query(
-      `update game set round = round + 1, drawn_at = null, started_at = null, live_at = null, ends_at = null,
+      `update game set round = round + 1, drawn_at = null, roles_at = null, started_at = null, live_at = null, ends_at = null,
               ended_at = null, winner_kind = null, winner_id = null, paused_at = null where id = $1`,
       [gid],
     );
@@ -492,7 +559,12 @@ export type CaptureResult =
   | { result: "ALREADY"; targetName: string; capturedBy: string }
   | { result: "SHIELDED"; shieldLeftS: number }
   | { result: "LOCKED"; lockedS: number }
-  | { result: "PHASE"; phase: Phase };
+  | { result: "PHASE"; phase: Phase }
+  | { result: "PARTNER"; targetName: string };
+
+/** Ghosts (captured fugitives) hunt like the hunters. */
+export const isGhost = (p: PlayerRow) => p.role === "FUGITIVE" && p.status === "CAPTURED" && !p.spectator;
+export const canCapture = (p: PlayerRow) => (p.role === "HUNTER" || isGhost(p)) && !p.spectator;
 
 const MAX_WRONG = 5;
 const LOCK_S = 60;
@@ -539,6 +611,11 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
       const [by] = (await c.query("select name from players where id = $1", [t.captured_by])).rows;
       return { result: "ALREADY", targetName: t.name, capturedBy: by?.name ?? "?" };
     }
+    // A ghost knows its ex-partner's password: no instant betrayal.
+    if (hunter.role === "FUGITIVE" && hunter.pair_id && t.pair_id === hunter.pair_id) {
+      await log("PARTNER", t.id);
+      return { result: "PARTNER", targetName: t.name };
+    }
     const [shield] = (
       await c.query<CardRow>("select * from cards where owner_id = $1 and code = 'GHOST_SHIELD' and not voided and active_until > now()", [t.id])
     ).rows;
@@ -557,17 +634,18 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
     );
     await c.query("update players set status = 'CAPTURED', captured_by = $1, captured_at = now() where id = $2", [hunterId, t.id]);
     await c.query("update pairs set pool = pool - $1 where id = $2", [stolen, pair.id]);
-    await c.query("update cards set voided = true where owner_id = $1", [t.id]);
+    await c.query("update cards set voided = true where owner_id = $1 and not (code = any($2))", [t.id, KEEP_ON_CAPTURE]);
     // The captured player comes back as a ghost on the hunters' side, first whisper after 3 minutes.
     await c.query("insert into cards (code, owner_id, uses_left, cooldown_until) values ('SUSSURRO', $1, null, now() + interval '3 minutes')", [t.id]);
     await log("OK", t.id);
 
     const [hunterRow] = (await c.query("select name from players where id = $1", [hunterId])).rows;
+    const by = hunter.role === "HUNTER" ? hunterRow.name : `il fantasma ${hunterRow.name}`;
     const [partner] = (await c.query<PlayerRow>("select * from players where pair_id = $1 and id <> $2", [pair.id, t.id])).rows;
     const partnerActive = partner?.status === "ACTIVE";
-    await sysMsg(c, gid, "HUNTERS", `${hunterRow.name} ha catturato ${t.name} (${pair.name}) · +${fmt(stolen + CAPTURE_BOUNTY)}. ${t.name} ora è un fantasma dalla vostra parte.`);
-    await sysMsg(c, gid, "FUGITIVES", `${t.name} (${pair.name}) è stato catturato.`);
-    await alert(c, t.id, "CAPTURED", `Catturato da ${hunterRow.name}. Ora sei un fantasma: aiuta i cercatori con il Sussurro.`);
+    await sysMsg(c, gid, "HUNTERS", `${hunter.role === "HUNTER" ? hunterRow.name : `👻 ${hunterRow.name}`} ha catturato ${t.name} (${pair.name}) · +${fmt(stolen + CAPTURE_BOUNTY)}. ${t.name} ora è un fantasma dalla vostra parte.`);
+    await sysMsg(c, gid, "FUGITIVES", `${t.name} (${pair.name}) è stato catturato${hunter.role === "HUNTER" ? "" : " da un fantasma"}.`);
+    await alert(c, t.id, "CAPTURED", `Catturato da ${by}. Ora sei un fantasma: catturi come i cercatori e hai il Sussurro.`);
     if (partner && partnerActive) {
       await alert(c, partner.id, "PARTNER_DOWN", `${t.name} è stato catturato. Il pool (${fmt(pair.pool - stolen)}) ora è tutto tuo.`);
     }
@@ -583,6 +661,47 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
 
 /* ---------------- cards ---------------- */
 
+/** Zombie card: a ghost comes back as an active fugitive, new password, short immunity. */
+async function rise(c: Db, g: GameRow, player: PlayerRow, card: CardRow) {
+  const taken = new Set((await c.query<{ password: string }>("select password from players where game_id = $1 and password is not null", [g.id])).rows.map((r) => r.password));
+  let pw = "";
+  for (let i = 0; !pw || taken.has(pw); i++) pw = PASSWORD_WORDS[randomInt(PASSWORD_WORDS.length)] + String(i < 50 ? randomInt(10, 100) : randomInt(1000, 10000));
+  await c.query("update cards set uses_left = 0, activated_at = now() where id = $1", [card.id]);
+  // Ghost-only cards (Sussurro) go; the points stolen as a ghost stay.
+  await c.query("update cards set voided = true where owner_id = $1 and code = 'SUSSURRO'", [player.id]);
+  await c.query(
+    "update players set status = 'ACTIVE', captured_by = null, captured_at = null, password = $1, out_since = null, out_reported = false where id = $2",
+    [pw, player.id],
+  );
+  await c.query(
+    "insert into cards (code, owner_id, uses_left, activated_at, active_until) values ('GHOST_SHIELD', $1, 0, now(), now() + make_interval(secs => $2::int))",
+    [player.id, ZOMBIE_SHIELD_S],
+  );
+  const [pair] = (await c.query<{ name: string }>("select name from pairs where id = $1", [player.pair_id])).rows;
+  await sysMsg(c, g.id, "HUNTERS", `🧟 ${player.name} è risorto dalla tomba ed è di nuovo un fuggiasco (${pair?.name ?? "?"}). Ha una password nuova.`);
+  await sysMsg(c, g.id, "FUGITIVES", `🧟 ${player.name} è risorto! ${pair?.name ?? "La sua coppia"} è di nuovo in gioco.`);
+  await sysMsg(c, g.id, "BROADCAST", `🧟 ${player.name} è risorto dalla tomba.`);
+  await alert(c, player.id, "INFO", `Sei risorto! Nuova password: ${pw}. Immune per ${ZOMBIE_SHIELD_S / 60} minuti.`);
+  return { message: `Sei risorto! Nuova password ${pw}, immune per ${ZOMBIE_SHIELD_S / 60} minuti.` };
+}
+
+const REWARD_NAME: Record<MissionReward, string> = { ZOMBIE: "Zombie", GHOST_SHIELD: "Ghost Shield", ECO: "Eco" };
+
+/** Card unlocked by a mission: to the uploader, or to the partner if the uploader already holds an unused Zombie. */
+async function grantReward(c: Db, me: PlayerRow, reward: MissionReward) {
+  const holds = async (id: string) =>
+    !!(await c.query("select 1 from cards where owner_id = $1 and code = 'ZOMBIE' and not voided and uses_left <> 0", [id])).rowCount;
+  let to: { id: string; name: string } | null = me;
+  if (reward === "ZOMBIE" && (await holds(me.id))) {
+    const [partner] = (await c.query<{ id: string; name: string; status: string }>("select id, name, status from players where pair_id = $1 and id <> $2", [me.pair_id, me.id])).rows;
+    to = partner && !(await holds(partner.id)) ? partner : null;
+  }
+  if (!to) return null;
+  await c.query("insert into cards (code, owner_id, uses_left) values ($1, $2, 1)", [reward, to.id]);
+  await alert(c, to.id, "INFO", `Carta sbloccata: ${REWARD_NAME[reward]}${reward === "ZOMBIE" ? ". Se ti catturano, usala da fantasma per risorgere." : "."}`);
+  return { name: REWARD_NAME[reward], to: to.name };
+}
+
 export async function playCard(player: PlayerRow, cardId: number, target: string | null) {
   const gid = player.game_id;
   const g = await getGame(null, gid);
@@ -595,11 +714,30 @@ export async function playCard(player: PlayerRow, cardId: number, target: string
     if (!card) throw new GameError("Carta non trovata.");
     const def = CARDS[card.code as CardCode];
     const eligible = def.side === "GHOST" ? player.status === "CAPTURED" : player.status === "ACTIVE";
-    if (!eligible) throw new GameError(def.side === "GHOST" ? "Il Sussurro è solo per i fantasmi." : "Sei fuori dal gioco.");
+    if (!eligible) throw new GameError(def.side === "GHOST" ? `${def.name}: si usa solo da fantasma.` : "Sei fuori dal gioco.");
     if (cardState(card, true, true, Date.now()) !== "READY") throw new GameError("Questa carta non è pronta.");
     if (def.needsSector === "ANY" && (!target || !/^C[1-9]$/.test(target))) throw new GameError("Scegli un settore.");
 
     let message = `${def.name} attiva.`;
+
+    if (card.code === "ZOMBIE") return rise(c, g, player, card);
+
+    if (card.code === "JUMPSCARE") {
+      // A random opponent: hunters scare a free fugitive, fugitives scare a hunter.
+      const victims = (
+        await c.query<{ id: string; name: string }>(
+          player.role === "HUNTER"
+            ? "select id, name from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE' and not spectator"
+            : "select id, name from players where game_id = $1 and role = 'HUNTER' and not spectator",
+          [gid],
+        )
+      ).rows;
+      if (!victims.length) throw new GameError("Non c'è nessuno da spaventare adesso.");
+      const v = victims[randomInt(victims.length)];
+      await alert(c, v.id, "JUMPSCARE", `Scherzetto di ${player.name}! 🎃`, "Apri Night Hunt. Subito.");
+      await sysMsg(c, gid, player.role === "HUNTER" ? "HUNTERS" : "FUGITIVES", `🎃 ${player.name} ha fatto un jumpscare a ${v.name}.`);
+      message = `Jumpscare a ${v.name}. Appena guarda il telefono...`;
+    }
 
     if (card.code === "RADAR_PING") {
       const [me] = (await c.query<PlayerRow>("select * from players where id = $1", [player.id])).rows;
@@ -761,11 +899,29 @@ export async function checkMissionUpload(me: PlayerRow, missionId: string, lat: 
   const phase = phaseOf(g);
   if (phase !== "LIVE" && phase !== "HEAD_START") throw new GameError("Le missioni sono aperte solo durante la partita.");
   if (me.role !== "FUGITIVE" || me.status !== "ACTIVE" || !me.pair_id || me.spectator) throw new GameError("Solo i fuggiaschi in gioco fanno le missioni.");
-  const m = missionsFor(g.zone, g.missions_mode).find((x) => x.id === missionId);
+  const m = allMissionsFor(g.zone, g.missions_mode).find((x) => x.id === missionId);
   if (!m) throw new GameError("Missione non trovata.");
-  const d = distanceM(lat, lng, m.lat, m.lng);
-  if (!Number.isFinite(d) || d > m.radiusM + Math.min(acc || 0, 25)) {
-    throw new GameError(`Sei a ${Math.round(d)} m da ${m.place}. La prova va fatta entro ${m.radiusM} m.`);
+  if (![lat, lng].every(Number.isFinite)) throw new GameError("Serve la posizione GPS.");
+  if (m.special === "AMBUSH") {
+    // A hunter with a fresh fix must really be this close right now.
+    const hunters = await q<{ lat: number; lng: number; acc_m: number | null }>(
+      `select lat, lng, acc_m from players where game_id = $1 and role = 'HUNTER' and not spectator
+          and lat is not null and fix_at > now() - interval '2 minutes'`,
+      [me.game_id],
+    );
+    const nearest = Math.min(...hunters.map((h) => distanceM(lat, lng, h.lat, h.lng) - Math.min(h.acc_m ?? 0, 25)));
+    if (!(nearest <= m.radiusM + Math.min(acc || 0, 25))) {
+      throw new GameError(
+        hunters.length ? `Nessun cercatore entro ${m.radiusM} m da te in questo momento. Avvicinatevi (con prudenza).` : "Nessun cercatore ha un GPS attivo adesso. Riprova tra poco.",
+      );
+    }
+  } else if (m.special === "STREET") {
+    if (!inPolygon(lng, lat, zoneOf(g.zone).boundary)) throw new GameError("Questa missione si fa dentro la zona di gioco.");
+  } else {
+    const d = distanceM(lat, lng, m.lat, m.lng);
+    if (!Number.isFinite(d) || d > m.radiusM + Math.min(acc || 0, 25)) {
+      throw new GameError(`Sei a ${Math.round(d)} m da ${m.place}. La prova va fatta entro ${m.radiusM} m.`);
+    }
   }
   const done = await q("select 1 from proofs where mission_id = $1 and pair_id = $2", [m.id, me.pair_id]);
   if (done.length) throw new GameError("La tua coppia ha già completato questa missione.");
@@ -803,8 +959,12 @@ export async function completeMission(
     ]);
     await c.query("update pairs set pool = pool + $1, last_gain_at = now() where id = $2", [points, me.pair_id]);
     const [pair] = (await c.query("select name from pairs where id = $1", [me.pair_id])).rows;
-    await sysMsg(c, me.game_id, "FUGITIVES", `${pair.name} · "${mission.title}" · +${fmt(points)}${flash ? " (lampo!)" : ""}`, proofId);
-    return { message: `+${fmt(points)} alla coppia${flash ? ", missione lampo!" : ""}` };
+    const card = mission.reward ? await grantReward(c, me, mission.reward) : null;
+    const cardNote = card ? ` · 🃏 ${card.name} a ${card.to}` : "";
+    await sysMsg(c, me.game_id, "FUGITIVES", `${pair.name} · "${mission.title}" · +${fmt(points)}${flash ? " (lampo!)" : ""}${cardNote}`, proofId);
+    return {
+      message: `+${fmt(points)} alla coppia${flash ? ", missione lampo!" : ""}${card ? ` Carta sbloccata: ${card.name}${card.to === me.name ? "" : ` (a ${card.to})`}.` : mission.reward ? " Avete già una carta Zombie a testa." : ""}`,
+    };
   });
 }
 
@@ -826,17 +986,116 @@ export async function album(me: PlayerRow) {
       where pr.game_id = $1 order by pr.id`,
     [g.id],
   );
-  const missions = zoneOf(g.zone).missions;
+  const missions = [...zoneOf(g.zone).missions, ...SPECIAL_MISSIONS];
   return list.map((p) => ({ ...p, title: missions.find((m) => m.id === p.mission_id)?.title ?? p.mission_id }));
 }
 
 /* ---------------- location ---------------- */
 
+/** A replay point at most every 30 s, or sooner after moving 12 m. */
+const TRACK_MIN_M = 12;
+const TRACK_MIN_MS = 30_000;
+
+async function recordTrack(p: PlayerRow, lat: number, lng: number) {
+  const [last] = await q<{ lat: number; lng: number; at: Date }>(
+    "select lat, lng, at from tracks where game_id = $1 and player_id = $2 order by id desc limit 1",
+    [p.game_id, p.id],
+  );
+  if (last && distanceM(last.lat, last.lng, lat, lng) < TRACK_MIN_M && Date.now() - +last.at < TRACK_MIN_MS) return;
+  const mode = p.role === "HUNTER" ? "H" : p.status === "CAPTURED" ? "G" : "F";
+  await q("insert into tracks (game_id, player_id, mode, lat, lng) values ($1, $2, $3, $4, $5)", [p.game_id, p.id, mode, lat, lng]);
+}
+
+/** Everything the end-of-game replay needs: who played, their routes, the captures. Only once the round is over. */
+export async function replayOf(me: PlayerRow) {
+  const g = await getGame(null, me.game_id);
+  if (phaseOf(g) !== "ENDED" || !g.started_at) throw new GameError("Il replay è disponibile a partita finita.");
+  const players = await q<{ id: string; name: string; role: Role; pair_id: string | null; pair: string | null }>(
+    `select p.id, p.name, p.role, p.pair_id, pr.name as pair
+       from players p left join pairs pr on pr.id = p.pair_id
+      where p.game_id = $1 and p.role is not null`,
+    [g.id],
+  );
+  const pts = await q<{ player_id: string; mode: string; lat: number; lng: number; t: string }>(
+    "select player_id, mode, lat, lng, (extract(epoch from at) * 1000)::bigint as t from tracks where game_id = $1 order by id",
+    [g.id],
+  );
+  const caps = await q<{ victim: string; hunter: string | null; t: string }>(
+    "select ref_id as victim, hunter_id as hunter, (extract(epoch from at) * 1000)::bigint as t from ledger where game_id = $1 and kind = 'CAPTURE' order by at",
+    [g.id],
+  );
+  const tracks: Record<string, [number, number, number, string][]> = {};
+  for (const p of pts) (tracks[p.player_id] ??= []).push([Number(p.t), p.lat, p.lng, p.mode]);
+  return {
+    start: +g.started_at,
+    live: g.live_at ? +g.live_at : null,
+    end: +(g.ended_at ?? g.ends_at ?? new Date()),
+    boundary: zoneOf(g.zone).boundary,
+    players: players.filter((p) => tracks[p.id]).map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, pair: p.pair })),
+    tracks,
+    captures: caps.map((c) => ({ victim: c.victim, hunter: c.hunter, t: Number(c.t) })),
+  };
+}
+
+/* ---------------- SOS ---------------- */
+
+/** Someone needs help: everyone is told where they are, and a running game pauses. */
+export async function sendSos(me: PlayerRow, lat: number | null, lng: number | null, acc: number | null) {
+  if (lat != null && lng != null) await q("update players set lat = $1, lng = $2, acc_m = $3::real, fix_at = now() where id = $4", [lat, lng, acc ?? 0, me.id]);
+  await tx(async (c) => {
+    const g = await getGame(c, me.game_id);
+    const { rows } = await c.query("select id from sos where game_id = $1 and player_id = $2 and resolved_at is null", [g.id, me.id]);
+    if (!rows.length) await c.query("insert into sos (game_id, player_id) values ($1, $2)", [g.id, me.id]);
+    const phase = phaseOf(g);
+    if (phase === "LIVE" || phase === "HEAD_START") await c.query("update game set paused_at = now() where id = $1 and paused_at is null", [g.id]);
+    await sysMsg(c, g.id, "BROADCAST", `🆘 SOS da ${me.name}. Partita in pausa: aprite l'avviso per vedere dov'è.`);
+  });
+  const others = (await q<{ id: string }>("select id from players where game_id = $1 and id <> $2", [me.game_id, me.id])).map((r) => r.id);
+  notify(others, `🆘 SOS · ${me.name}`, "Ha bisogno di aiuto. Apri Night Hunt per vedere dov'è.", "sos");
+}
+
+export async function sosComing(me: PlayerRow, id: number) {
+  const [row] = await q<{ player_id: string; name: string }>(
+    `update sos s set responders = array_append(s.responders, $3)
+      where s.id = $1 and s.game_id = $2 and s.resolved_at is null and s.player_id <> $4 and not ($3 = any(s.responders))
+      returning s.player_id, (select name from players where id = s.player_id) as name`,
+    [id, me.game_id, me.name, me.id],
+  );
+  if (!row) return;
+  await tx((c) => sysMsg(c, me.game_id, "BROADCAST", `🏃 ${me.name} sta andando ad aiutare ${row.name}.`));
+  notify([row.player_id], "Arriva aiuto", `${me.name} sta venendo da te.`, "sos-help");
+}
+
+export async function resolveSos(me: PlayerRow, id: number) {
+  const g = await getGame(null, me.game_id);
+  const [row] = await q<{ player_id: string }>("select player_id from sos where id = $1 and game_id = $2 and resolved_at is null", [id, g.id]);
+  if (!row) return;
+  if (row.player_id !== me.id && g.host_id !== me.id) throw new GameError("Può chiudere l'SOS solo chi l'ha mandato o l'organizzatore.");
+  const [who] = await q<{ name: string }>("select name from players where id = $1", [row.player_id]);
+  await tx(async (c) => {
+    await c.query("update sos set resolved_at = now(), resolved_by = $2 where id = $1", [id, me.name]);
+    await sysMsg(c, g.id, "BROADCAST", `✅ SOS di ${who?.name ?? "?"} risolto${row.player_id === me.id ? "" : ` da ${me.name}`}. L'organizzatore può far ripartire la partita.`);
+  });
+  const others = (await q<{ id: string }>("select id from players where game_id = $1 and id <> $2", [g.id, me.id])).map((r) => r.id);
+  notify(others, "✅ SOS risolto", `${who?.name ?? "Il giocatore"} sta bene.`, "sos-ok");
+}
+
+const ROUGH_FIX_M = 150;
+
 export async function reportLocation(player: PlayerRow, lat: number, lng: number, acc: number) {
   const g = await getGame(null, player.game_id);
   const BOUNDARY = zoneOf(g.zone).boundary;
   const phase = phaseOf(g);
-  await q("update players set lat = $1, lng = $2, acc_m = $3, fix_at = now() where id = $4", [lat, lng, acc, player.id]);
+  // A rough network fix never replaces a sharp GPS fix from the last minute (Android sends both).
+  await q(
+    // Explicit casts: Postgres can't infer the type of $3 inside "$3 / 3" and refuses the query.
+    `update players set lat = $1, lng = $2, acc_m = $3::real, fix_at = now()
+     where id = $4 and not ($3::real > $5::real and acc_m is not null and acc_m < $3::real / 3 and fix_at > now() - interval '60 seconds')`,
+    [lat, lng, acc, player.id, ROUGH_FIX_M],
+  );
+  // Too rough to say who's over the line (no "fuori confine") or to draw on the replay.
+  if (acc > ROUGH_FIX_M) return;
+  if (player.role && !player.spectator && (phase === "LIVE" || phase === "HEAD_START")) await recordTrack(player, lat, lng);
   if (!player.role || player.status !== "ACTIVE" || player.spectator || (phase !== "LIVE" && phase !== "HEAD_START")) return;
 
   if (inPolygon(lng, lat, BOUNDARY)) {
@@ -869,8 +1128,86 @@ export function channelsFor(p: PlayerRow, phase: Phase): Channel[] {
   return ["BROADCAST"];
 }
 
+/* ---------------- group chats: anyone in the game, picked by whoever creates the group ---------------- */
+
+const isGroup = (channel: string) => /^G\d+$/.test(channel);
+const groupId = (channel: string) => Number(channel.slice(1));
+const MAX_GROUP_NAME = 30;
+
+async function myGroups(p: PlayerRow) {
+  return q<{ id: number; name: string; created_by: string | null }>(
+    `select g.id::int as id, g.name, g.created_by from chat_groups g join chat_group_members m on m.group_id = g.id
+      where m.player_id = $1 and g.game_id = $2 order by g.id`,
+    [p.id, p.game_id],
+  );
+}
+
+/** Team chats the role allows, plus every group this player is in. */
+export async function readableChannels(p: PlayerRow, phase: Phase): Promise<string[]> {
+  return [...channelsFor(p, phase), ...(await myGroups(p)).map((g) => `G${g.id}`)];
+}
+
+async function groupPlayers(gid: number, ids: unknown): Promise<PlayerRow[]> {
+  const list = Array.isArray(ids) ? [...new Set(ids.map(String))] : [];
+  if (!list.length) return [];
+  return q<PlayerRow>("select * from players where game_id = $1 and id = any($2)", [gid, list]);
+}
+
+export async function createGroup(me: PlayerRow, rawName: string, memberIds: unknown) {
+  const name = Array.from(String(rawName ?? "").trim().replace(/\s+/g, " ")).slice(0, MAX_GROUP_NAME).join("");
+  if (!name) throw new GameError("Dai un nome al gruppo.");
+  const others = (await groupPlayers(me.game_id, memberIds)).filter((x) => x.id !== me.id);
+  if (!others.length) throw new GameError("Scegli almeno una persona.");
+  return tx(async (c) => {
+    const [grp] = (await c.query<{ id: string }>("insert into chat_groups (game_id, name, created_by) values ($1, $2, $3) returning id", [me.game_id, name, me.id])).rows;
+    for (const m of [me, ...others]) await c.query("insert into chat_group_members (group_id, player_id) values ($1, $2) on conflict do nothing", [grp.id, m.id]);
+    await sysMsg(c, me.game_id, `G${grp.id}`, `${me.name} ha creato il gruppo con ${others.map((o) => o.name).join(", ")}.`);
+    return { channel: `G${grp.id}` };
+  });
+}
+
+/** Outside a transaction pass null. */
+async function requireMember(c: Db | null, me: PlayerRow, channel: string) {
+  if (!isGroup(channel)) throw new GameError("Gruppo non trovato.");
+  const sql = "select 1 from chat_group_members m join chat_groups g on g.id = m.group_id where m.group_id = $1 and m.player_id = $2 and g.game_id = $3";
+  const args = [groupId(channel), me.id, me.game_id];
+  const found = c ? (await c.query(sql, args)).rowCount : (await q(sql, args)).length;
+  if (!found) throw new GameError("Non fai parte di questo gruppo.");
+}
+
+export async function addToGroup(me: PlayerRow, channel: string, memberIds: unknown) {
+  const add = await groupPlayers(me.game_id, memberIds);
+  if (!add.length) throw new GameError("Scegli almeno una persona.");
+  await tx(async (c) => {
+    await requireMember(c, me, channel);
+    const added: string[] = [];
+    for (const m of add) {
+      const r = await c.query("insert into chat_group_members (group_id, player_id) values ($1, $2) on conflict do nothing", [groupId(channel), m.id]);
+      if (r.rowCount) added.push(m.name);
+    }
+    if (added.length) await sysMsg(c, me.game_id, channel, `${me.name} ha aggiunto ${added.join(", ")}.`);
+  });
+}
+
+export async function leaveGroup(me: PlayerRow, channel: string) {
+  await tx(async (c) => {
+    await requireMember(c, me, channel);
+    await c.query("delete from chat_group_members where group_id = $1 and player_id = $2", [groupId(channel), me.id]);
+    const { rowCount } = await c.query("select 1 from chat_group_members where group_id = $1", [groupId(channel)]);
+    if (rowCount) await sysMsg(c, me.game_id, channel, `${me.name} ha lasciato il gruppo.`);
+    else {
+      await c.query("delete from messages where game_id = $1 and channel = $2", [me.game_id, channel]);
+      await c.query("delete from chat_groups where id = $1", [groupId(channel)]);
+    }
+  });
+}
+
 async function checkWritable(p: PlayerRow, channel: string) {
   const g = await getGame(null, p.game_id);
+  if (isGroup(channel)) {
+    await requireMember(null, p, channel);
+    return g;
+  }
   const phase = phaseOf(g);
   const writable = channelsFor(p, phase).filter((ch) => ch !== "BROADCAST" || phase === "LOBBY" || phase === "ENDED");
   if (!channelsFor(p, phase).includes(channel as Channel)) throw new GameError("Questa chat è riservata all'altra squadra.");
@@ -878,11 +1215,38 @@ async function checkWritable(p: PlayerRow, channel: string) {
   return g;
 }
 
+const CHAT_LABEL: Record<Channel, string> = { HUNTERS: "Cercatori", FUGITIVES: "Fuggiaschi", BROADCAST: "Tutti" };
+// The app polls only while it's on screen and sends a beacon when it leaves it,
+// so "not away and seen in the last few seconds" means the chat is in front of them.
+const ON_SCREEN_MS = 8_000;
+
+/** Push for a new chat message to everyone who can read that chat and isn't looking at the app right now. */
+async function notifyChat(g: GameRow, sender: PlayerRow, channel: string, preview: string) {
+  const phase = phaseOf(g);
+  const group = isGroup(channel);
+  const rows = group
+    ? await q<PlayerRow>(
+        "select p.* from players p join chat_group_members m on m.player_id = p.id where m.group_id = $1 and p.id <> $2",
+        [groupId(channel), sender.id],
+      )
+    : await q<PlayerRow>("select * from players where game_id = $1 and id <> $2", [g.id, sender.id]);
+  const label = group
+    ? (await q<{ name: string }>("select name from chat_groups where id = $1", [groupId(channel)]))[0]?.name ?? "Gruppo"
+    : CHAT_LABEL[channel as Channel] ?? "Chat";
+  const to = rows
+    .filter((r) => group || channelsFor(r, phase).includes(channel as Channel))
+    .filter((r) => r.away || !r.last_seen || Date.now() - +r.last_seen > ON_SCREEN_MS)
+    .map((r) => r.id);
+  notify(to, `${sender.name} · ${label}`, preview, `chat-${channel}`);
+}
+
 const AUDIO_TYPES: Record<string, string> = { "audio/mp4": "m4a", "audio/aac": "aac", "audio/webm": "webm", "audio/ogg": "ogg", "audio/mpeg": "mp3" };
 export const MAX_AUDIO_BYTES = 3 * 1024 * 1024;
 
 /** Voice message: stored privately in Blob, played back through /api/audio/[id]. */
-export async function postAudio(p: PlayerRow, channel: string, bytes: Buffer, contentType: string, ms: number) {
+/** Voice message. `radio` marks a push-to-talk message and the voice effect it's played back with. */
+export async function postAudio(p: PlayerRow, channel: string, bytes: Buffer, contentType: string, ms: number, radio: string | null = null) {
+  const fx = radio === "police" || radio === "ghost" ? radio : null;
   const base = contentType.split(";")[0].trim().toLowerCase();
   const ext = AUDIO_TYPES[base];
   if (!ext) throw new GameError("Formato audio non supportato.");
@@ -890,10 +1254,11 @@ export async function postAudio(p: PlayerRow, channel: string, bytes: Buffer, co
   if (bytes.length > MAX_AUDIO_BYTES) throw new GameError("Audio troppo lungo.");
   const g = await checkWritable(p, channel);
   const blob = await putBlob(`audio/g${g.id}/r${g.round}/${randomUUID()}.${ext}`, bytes, { access: "private", contentType: base });
-  await q("insert into messages (game_id, channel, sender_id, body, audio_path, audio_ms, audio_type) values ($6, $1, $2, '', $3, $4, $5)", [
-    channel, p.id, blob.pathname, Math.max(0, Math.min(61_000, Math.round(ms) || 0)), base, g.id,
+  await q("insert into messages (game_id, channel, sender_id, body, audio_path, audio_ms, audio_type, radio) values ($6, $1, $2, '', $3, $4, $5, $7)", [
+    channel, p.id, blob.pathname, Math.max(0, Math.min(61_000, Math.round(ms) || 0)), base, g.id, fx,
   ]);
   await q("update players set typing_at = null where id = $1", [p.id]);
+  await notifyChat(g, p, channel, fx ? "📻 Messaggio radio" : "🎤 Messaggio vocale");
 }
 
 export async function audioForViewer(me: PlayerRow, id: number) {
@@ -903,25 +1268,28 @@ export async function audioForViewer(me: PlayerRow, id: number) {
   );
   if (!m?.audio_path || m.deleted_at) return null;
   const g = await getGame(null, me.game_id);
-  return channelsFor(me, phaseOf(g)).includes(m.channel as Channel) ? m.audio_path : null;
+  return (await readableChannels(me, phaseOf(g))).includes(m.channel) ? m.audio_path : null;
 }
 
 export async function postMessage(p: PlayerRow, channel: string, body: string) {
   const text = body.trim().slice(0, 500);
   if (!text) throw new GameError("Messaggio vuoto.");
   // "Tutti" (broadcast) is open to everyone before and after the game, read-only during it.
-  await checkWritable(p, channel);
+  const g = await checkWritable(p, channel);
   await q("insert into messages (game_id, channel, sender_id, body) values ($1, $2, $3, $4)", [p.game_id, channel, p.id, text]);
   await q("update players set typing_at = null where id = $1", [p.id]);
+  await notifyChat(g, p, channel, text.length > 140 ? `${text.slice(0, 140)}…` : text);
 }
 
 /** "Elimina per tutti": your own messages, or anyone's if you're the host. System messages stay. */
 export async function deleteMessage(me: PlayerRow, id: number) {
-  const [m] = await q<{ sender_id: string | null; kind: string; deleted_at: Date | null; audio_path: string | null }>(
-    "select sender_id, kind, deleted_at, audio_path from messages where id = $1 and game_id = $2",
+  const [m] = await q<{ sender_id: string | null; kind: string; deleted_at: Date | null; audio_path: string | null; channel: string }>(
+    "select sender_id, kind, deleted_at, audio_path, channel from messages where id = $1 and game_id = $2",
     [id, me.game_id],
   );
   if (!m || m.kind !== "USER") throw new GameError("Messaggio non trovato.");
+  // Group chats are private, the host included.
+  if (isGroup(m.channel)) await requireMember(null, me, m.channel);
   if (m.deleted_at) return;
   if (m.sender_id !== me.id) {
     const g = await getGame(null, me.game_id);
@@ -934,7 +1302,7 @@ export async function deleteMessage(me: PlayerRow, id: number) {
 /** "Sta scrivendo…": remembered for a few seconds, only shown to people in the same chat. */
 export async function setTyping(p: PlayerRow, channel: string, audio = false) {
   const g = await getGame(null, p.game_id);
-  if (!channelsFor(p, phaseOf(g)).includes(channel as Channel)) return;
+  if (!(await readableChannels(p, phaseOf(g))).includes(channel)) return;
   await q("update players set typing_channel = $1, typing_kind = $2, typing_at = now() where id = $3", [channel, audio ? "audio" : "text", p.id]);
 }
 
@@ -959,6 +1327,76 @@ export async function getAvatar(viewer: PlayerRow, playerId: string) {
 
 /* ---------------- player state ---------------- */
 
+/**
+ * End-of-game standings. General: everyone individually — hunters by points stolen; fugitives by
+ * their share of the pair pool at the end (0 once captured, it was stolen) plus what they stole as ghosts.
+ * Categories: hunters (born hunters only), ghosts, missions per player. Pairs are in results.pairs.
+ */
+async function standingsOf(g: GameRow) {
+  const [players, pools, proofs] = await Promise.all([
+    q<{ id: string; name: string; role: Role; status: string; pair_id: string | null; stolen: number }>(
+      `select p.id, p.name, p.role, p.status, p.pair_id,
+              coalesce((select sum(l.hunter_delta) from ledger l where l.hunter_id = p.id and l.game_id = p.game_id), 0)::int as stolen
+         from players p where p.game_id = $1 and not p.spectator and p.role is not null order by p.joined_at`,
+      [g.id],
+    ),
+    q<{ id: string; name: string; pool: number }>("select id, name, pool from pairs where game_id = $1", [g.id]),
+    q<{ player_id: string; n: number; pts: number }>(
+      "select player_id, count(*)::int as n, coalesce(sum(points), 0)::int as pts from proofs where game_id = $1 group by player_id",
+      [g.id],
+    ),
+  ]);
+  const pairOf = new Map(pools.map((p) => [p.id, p]));
+  // Split each pool among the members still free; the odd point goes to the first of them.
+  const share = new Map<string, number>();
+  for (const pr of pools) {
+    const free = players.filter((p) => p.pair_id === pr.id && p.status === "ACTIVE");
+    const each = free.length ? Math.floor(pr.pool / free.length) : 0;
+    free.forEach((p, i) => share.set(p.id, each + (i === 0 ? pr.pool - each * free.length : 0)));
+  }
+  const sortDesc = <T extends { points: number; name: string }>(xs: T[]) => xs.sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
+  const general = sortDesc(
+    players.map((p) => {
+      const ghost = p.role === "FUGITIVE" && p.status === "CAPTURED";
+      const quota = share.get(p.id) ?? 0;
+      return {
+        id: p.id, name: p.name, role: p.role, ghost,
+        points: p.role === "HUNTER" ? p.stolen : quota + p.stolen,
+        detail: p.role === "HUNTER" ? "cercatore" : ghost ? (p.stolen ? `fantasma · ${fmt(p.stolen)} rubati` : "fantasma") : `in fuga · quota ${fmt(quota)}`,
+      };
+    }),
+  );
+  const hunters = sortDesc(players.filter((p) => p.role === "HUNTER").map((p) => ({ id: p.id, name: p.name, points: p.stolen })));
+  const ghosts = sortDesc(
+    players
+      .filter((p) => p.role === "FUGITIVE" && p.status === "CAPTURED")
+      .map((p) => ({ id: p.id, name: p.name, points: p.stolen, detail: pairOf.get(p.pair_id ?? "")?.name ?? "" })),
+  );
+  const missions = players
+    .filter((p) => p.role === "FUGITIVE")
+    .map((p) => {
+      const pr = proofs.find((x) => x.player_id === p.id);
+      return { id: p.id, name: p.name, count: pr?.n ?? 0, points: pr?.pts ?? 0, detail: pairOf.get(p.pair_id ?? "")?.name ?? "" };
+    })
+    .sort((a, b) => b.count - a.count || b.points - a.points || a.name.localeCompare(b.name));
+  return { general, hunters, ghosts, missions };
+}
+
+/** Graveyard for the final screen: everyone captured this round, with the points their pair lost and who took them. */
+async function fallenOf(g: GameRow) {
+  const rows = await q<{ id: string; name: string; pair: string | null; lost: number; by: string | null; at: Date; status: string }>(
+    `select p.id, p.name, p.status, pr.name as pair, -l.pair_delta as lost, h.name as by, l.at
+       from ledger l
+       join players p on p.id = l.ref_id
+       left join pairs pr on pr.id = l.pair_id
+       left join players h on h.id = l.hunter_id
+      where l.game_id = $1 and l.kind = 'CAPTURE' and l.at >= coalesce($2, 'epoch'::timestamptz)
+      order by l.at`,
+    [g.id, g.started_at],
+  );
+  return rows.map((r) => ({ id: r.id, name: r.name, pair: r.pair ?? "", lost: r.lost, by: r.by ?? "?", at: r.at.toISOString(), risen: r.status === "ACTIVE" }));
+}
+
 export async function playerState(me: PlayerRow, afterMsg: number) {
   let g = await getGame(null, me.game_id);
   const zone = zoneOf(g.zone);
@@ -971,12 +1409,19 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
   const flash = flashNow(g, now);
   const isHost = g.host_id === me.id;
 
-  const channels = channelsFor(me, phase);
+  const groups = await myGroups(me);
+  const channels = [...channelsFor(me, phase), ...groups.map((x) => `G${x.id}`)];
+  const groupMembers = groups.length
+    ? await q<{ group_id: number; id: string; name: string }>(
+        "select m.group_id::int as group_id, p.id, p.name from chat_group_members m join players p on p.id = m.player_id where m.group_id = any($1) order by m.added_at",
+        [groups.map((x) => x.id)],
+      )
+    : [];
   const [messages, alerts, cardRows, hunters, pairs, roster] = await Promise.all([
     q(
       `select m.id::int as id, m.channel, m.kind, m.body, m.at, m.proof_id::int as proof_id, pr.kind as proof_kind,
               p.name as sender, p.id as sender_id, p.id = $3 as mine, m.deleted_at is not null as deleted,
-              m.audio_path is not null as audio, m.audio_ms
+              m.audio_path is not null as audio, m.audio_ms, m.radio
          from messages m left join players p on p.id = m.sender_id left join proofs pr on pr.id = m.proof_id
         where m.game_id = $4 and m.channel = any($1) and m.id > $2 order by m.id desc limit 100`,
       [channels, afterMsg, me.id, g.id],
@@ -985,8 +1430,8 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     q<CardRow>("select * from cards where owner_id = $1 order by id", [me.id]),
     hunterTotals(null, g.id),
     pairTable(null, g.id),
-    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null }>(
-      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen from players where game_id = $1 order by joined_at",
+    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null; partner_pick: string | null }>(
+      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen, partner_pick from players where game_id = $1 order by joined_at",
       [g.id],
     ),
   ]);
@@ -994,7 +1439,11 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
   const cards = cardRows.map((c) => ({
     id: c.id,
     code: c.code,
-    state: cardState(c, live, CARDS[c.code as CardCode].side === "GHOST" ? me.status === "CAPTURED" : me.status === "ACTIVE", now),
+    // A Zombie held while still free is waiting, not spent: it's for after a capture.
+    state:
+      c.code === "ZOMBIE" && me.status === "ACTIVE" && !c.voided && c.uses_left !== 0
+        ? ("LOCKED" as const)
+        : cardState(c, live, CARDS[c.code as CardCode].side === "GHOST" ? me.status === "CAPTURED" : me.status === "ACTIVE", now),
     usesLeft: c.uses_left,
     activeUntil: c.active_until,
     cooldownUntil: c.cooldown_until,
@@ -1014,6 +1463,9 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       round: g.round,
       phase,
       drawn: !!g.drawn_at,
+      rolesDrawn: !!g.roles_at,
+      huntersN: g.hunters_n,
+      huntersPlanned: huntersFor(roster.filter((r) => !r.spectator).length, g.hunters_n),
       liveAt: g.live_at,
       endsAt: g.ends_at,
       boundary: BOUNDARY,
@@ -1035,17 +1487,32 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       ? roster.map((p) => ({ id: p.id, name: p.name, role: p.role, status: p.status, spectator: p.spectator, rejoinCode: p.rejoin_code, lastSeen: p.last_seen }))
       : null,
     me: { id: me.id, name: me.name, role: me.role, status: me.status, pairId: me.pair_id, rejoinCode: me.rejoin_code, spectator: me.spectator },
+    // Open SOS calls, with the live position of whoever sent them.
+    sos: (
+      await q<{ id: string; player_id: string; name: string; lat: number | null; lng: number | null; acc_m: number | null; fix_at: Date | null; at: Date; responders: string[] }>(
+        `select s.id, s.player_id, p.name, p.lat, p.lng, p.acc_m, p.fix_at, s.at, s.responders
+           from sos s join players p on p.id = s.player_id
+          where s.game_id = $1 and s.resolved_at is null order by s.at`,
+        [g.id],
+      )
+    ).map((r) => ({ id: Number(r.id), playerId: r.player_id, name: r.name, lat: r.lat, lng: r.lng, acc: r.acc_m, fixAt: r.fix_at, at: r.at, responders: r.responders, mine: r.player_id === me.id })),
     avatars: Object.fromEntries(roster.filter((p) => p.avatar_at).map((p) => [p.id, +p.avatar_at!])),
     typing: roster
-      .filter((p) => p.id !== me.id && p.typing_at && now - +p.typing_at < 5000 && channels.includes(p.typing_channel as Channel))
+      .filter((p) => p.id !== me.id && p.typing_at && now - +p.typing_at < 5000 && channels.includes(p.typing_channel ?? ""))
       .map((p) => ({ id: p.id, name: p.name, channel: p.typing_channel, audio: p.typing_kind === "audio" })),
     lobby: {
-      players: roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, spectator: p.spectator })),
+      players: roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, spectator: p.spectator, partnerPick: p.partner_pick })),
       pairs: pairs.map((p) => ({ id: p.id, name: p.name, members: roster.filter((r) => r.pair_id === p.id).map((r) => r.name) })),
     },
     cards,
     messages: messages.reverse(),
     channels,
+    groups: groups.map((x) => ({
+      channel: `G${x.id}`,
+      name: x.name,
+      createdBy: x.created_by,
+      members: groupMembers.filter((m) => m.group_id === x.id).map((m) => ({ id: m.id, name: m.name })),
+    })),
     alerts,
     // Messages already on the phone that were deleted since: the client blanks them out.
     deletedIds: (
@@ -1054,8 +1521,12 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     results:
       phase === "ENDED" || (me.spectator && phase !== "LOBBY")
         ? {
-            hunters: hunters.map((h) => ({ id: h.id, name: h.name, stolen: h.stolen })),
-            pairs: pairs.map((p) => ({ id: p.id, name: p.name, pool: p.pool, active: p.active })).sort((a, b) => b.pool - a.pool),
+            fallen: await fallenOf(g),
+            standings: await standingsOf(g),
+            hunters: hunters.map((h) => ({ id: h.id, name: h.name, stolen: h.stolen, ghost: h.ghost })),
+            pairs: pairs
+              .map((p) => ({ id: p.id, name: p.name, pool: p.pool, active: p.active, members: roster.filter((r) => r.pair_id === p.id).map((r) => ({ id: r.id, name: r.name })) }))
+              .sort((a, b) => b.pool - a.pool),
           }
         : null,
   };
@@ -1084,7 +1555,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       hunter: {
         stolen: hunters.find((h) => h.id === me.id)?.stolen ?? 0,
         rank: hunters.findIndex((h) => h.id === me.id) + 1,
-        hunters: hunters.map((h) => ({ id: h.id, name: h.name, stolen: h.stolen })),
+        hunters: hunters.map((h) => ({ id: h.id, name: h.name, stolen: h.stolen, ghost: h.ghost })),
         fugitives: fugitives.map((f) => ({ pairId: f.pair_id!, captured: f.status === "CAPTURED" })),
         pings,
         lastPingSectors: lastPing ? Object.keys(lastPing.sectors) : [],
@@ -1100,7 +1571,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     const pair = pairs.find((p) => p.id === me.pair_id)!;
     const [partner] = await q<PlayerRow>("select * from players where pair_id = $1 and id <> $2", [me.pair_id, me.id]);
     const proofs = await q<{ id: number; mission_id: string }>("select id::int as id, mission_id from proofs where pair_id = $1", [me.pair_id]);
-    const missions = missionsFor(g.zone, g.missions_mode).map((m) => ({
+    const missions = allMissionsFor(g.zone, g.missions_mode).map((m) => ({
       ...m,
       proofId: proofs.find((p) => p.mission_id === m.id)?.id ?? null,
       flashUntil: flash?.mission.id === m.id ? flash.until : null,
@@ -1128,6 +1599,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     const alive = pairs.filter((p) => p.active > 0).sort((a, b) => b.pool - a.pool || b.active - a.active);
     return {
       ...base,
+      ghostCapture: isGhost(me) ? { ...(await lockState(me.id)), stolen: hunters.find((h) => h.id === me.id)?.stolen ?? 0 } : null,
       fugitive: {
         password: me.password,
         pair: { id: pair.id, name: pair.name, pool: pair.pool, active: pair.active },

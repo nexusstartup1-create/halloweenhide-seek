@@ -14,12 +14,14 @@
   },
   "dependencies": {
     "@lottiefiles/dotlottie-react": "^0.19.16",
+    "@paper-design/shaders-react": "^0.0.81",
     "@vercel/blob": "^2.8.0",
     "maplibre-gl": "^6.11.2",
     "next": "16.3.8",
     "pg": "^8.23.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "three": "^0.186.1",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
@@ -27,6 +29,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.186.0",
     "@types/web-push": "^3.6.4",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",

@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { playRadio, type RadioFx } from "./radio";
 
 const MAX_MS = 60_000;
 // mp4/AAC first: it plays everywhere, iPhones included. Chrome on Android falls back to WebM/Opus.
-const TYPES = ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+export const TYPES = ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
 
 const mmss = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -106,7 +107,7 @@ export function VoiceRecorder({ channel, onDone, onCancel, onError }: {
 }
 
 /** Voice message bubble: play/pause, progress and duration. */
-export function VoiceBubble({ id, ms }: { id: number; ms: number | null }) {
+export function VoiceBubble({ id, ms, radio }: { id: number; ms: number | null; radio?: RadioFx | null }) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(0);
@@ -116,6 +117,11 @@ export function VoiceBubble({ id, ms }: { id: number; ms: number | null }) {
   useEffect(() => () => audio.current?.pause(), []);
 
   const toggle = async () => {
+    // Radio messages replay with their effect (no pause: it's a transmission).
+    if (radio) {
+      if (playing) return;
+      return playRadio(id, radio, setPlaying);
+    }
     if (!audio.current) {
       const a = new Audio(`/api/audio/${id}`);
       a.preload = "auto";
@@ -146,7 +152,7 @@ export function VoiceBubble({ id, ms }: { id: number; ms: number | null }) {
           <i key={i} className={i / 22 < frac ? "on" : ""} style={{ height: `${30 + ((i * 37) % 70)}%` }} />
         ))}
       </span>
-      <span className="vtime num">{err ? "Non riproducibile" : mmss(playing || pos ? pos : dur)}</span>
+      <span className="vtime num">{err ? "Non riproducibile" : radio ? (playing ? "in onda…" : `📻 ${mmss(dur)}`) : mmss(playing || pos ? pos : dur)}</span>
     </span>
   );
 }

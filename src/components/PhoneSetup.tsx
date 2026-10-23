@@ -34,7 +34,7 @@ function urlB64ToUint8Array(b64: string) {
 
 const VAPID = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
 
-function env() {
+export function phoneEnv() {
   if (typeof window === "undefined") return { ios: false, standalone: false, push: false };
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const standalone = window.matchMedia("(display-mode: standalone)").matches || (navigator as { standalone?: boolean }).standalone === true;
@@ -48,6 +48,20 @@ async function subscribePush() {
   await post("/api/push", sub.toJSON());
 }
 
+/** Whether Chrome offered the install prompt, and a function to show it. */
+export function useInstallPrompt() {
+  const canPrompt = useSyncExternalStore(subscribeInstall, () => !!deferred, () => false);
+  const install = async () => {
+    if (!deferred) return false;
+    await deferred.prompt();
+    const choice = await deferred.userChoice.catch(() => null);
+    deferred = null;
+    listeners.forEach((l) => l());
+    return choice?.outcome === "accepted";
+  };
+  return { canPrompt, install };
+}
+
 /** "Get your phone ready" card: install the app and turn on notifications. */
 export function PhoneSetup({ toast }: { toast: (t: string, bad?: boolean) => void }) {
   const canPrompt = useSyncExternalStore(subscribeInstall, () => !!deferred, () => false);
@@ -57,7 +71,7 @@ export function PhoneSetup({ toast }: { toast: (t: string, bad?: boolean) => voi
 
   useEffect(() => {
     const t = setTimeout(() => {
-      const e = env();
+      const e = phoneEnv();
       setInfo(e);
       const p = e.push ? Notification.permission : "unsupported";
       setPerm(p);

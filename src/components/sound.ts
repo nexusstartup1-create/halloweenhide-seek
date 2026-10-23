@@ -1,7 +1,7 @@
 "use client";
 // Short game sounds synthesised with Web Audio: no files to download, works offline.
 
-export type Sfx = "start" | "ping" | "alert" | "capture" | "mission" | "card" | "whisper";
+export type Sfx = "start" | "ping" | "alert" | "capture" | "mission" | "card" | "whisper" | "scream";
 
 let ctx: AudioContext | null = null;
 
@@ -21,6 +21,11 @@ function audio() {
   }
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
   return ctx;
+}
+
+/** Shared audio context (created on demand, resumed if the browser suspended it). */
+export function audioContext() {
+  return audio();
 }
 
 /** Browsers only allow sound after a tap: call once on the first interaction. */
@@ -93,6 +98,12 @@ export function play(name: Sfx) {
       break;
     case "card":
       tone(a, { freq: 300, to: 900, dur: 0.25, type: "triangle", gain: 0.12 });
+      break;
+    case "scream": // jumpscare: harsh shriek sliding down, a hiss and a low thud
+      tone(a, { freq: 1600, to: 380, dur: 1.4, type: "sawtooth", gain: 0.3 });
+      tone(a, { freq: 1210, to: 290, dur: 1.3, type: "square", gain: 0.12 });
+      noise(a, { dur: 1.1, gain: 0.25, freq: 3000 });
+      tone(a, { freq: 70, to: 40, dur: 0.6, type: "sine", gain: 0.45 });
       break;
     case "whisper":
       noise(a, { dur: 1.2, gain: 0.1, freq: 2500 });
