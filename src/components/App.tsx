@@ -10,17 +10,30 @@ import { Missions } from "./Missions";
 import { RoleIntro } from "./GhostAnim";
 import { Jumpscare } from "./Jumpscare";
 import { Onboarding, onboardingDone } from "./Onboarding";
+import { subscribePush } from "./PhoneSetup";
 import { RadioButton } from "./RadioButton";
 import { playRadio, radioAuto, radioFx, setRadioAuto, setRadioFx, type RadioFx } from "./radio";
 import { SosButton, SosLayer, SosSheet } from "./Sos";
 import { Capture, Comms, Deck, FugitiveHud, Ghost, HunterHud, MapTab, Results } from "./Screens";
 import type { GameState, Message } from "./types";
-import { buzz, post, setVibration, vibrationOn } from "./util";
+import { buzz, flushOutbox, outbox, OUTBOX_EVENT, post, setVibration, vibrationOn } from "./util";
 
 type Tab = "hud" | "map" | "main" | "deck" | "comms";
 const POLL_MS = 3000;
 /** Faster while the chat is open, so "sta scrivendo…" and new messages show up quickly. */
 const POLL_CHAT_MS = 1200;
+
+/** What to say when an action that waited for the network finally went through. */
+function sentText(data: unknown) {
+  const d = (data ?? {}) as { message?: string; result?: string; targetName?: string; stolen?: number; attemptsLeft?: number };
+  if (d.message) return d.message;
+  if (d.result === "OK") return `preso ${d.targetName} · +${(d.stolen ?? 0).toLocaleString("it-IT")}`;
+  if (d.result === "WRONG") return `password sbagliata (${d.attemptsLeft} tentativi)`;
+  if (d.result === "SHIELDED") return "aveva il Ghost Shield";
+  if (d.result === "ALREADY") return `${d.targetName} era già stato preso`;
+  if (d.result) return "non riuscita";
+  return "inviato";
+}
 
 function readNum(key: string): number {
   try { return Number(localStorage.getItem(key) ?? 0); } catch { return 0; }
@@ -74,6 +87,9 @@ export default function App() {
   const [sound, setSoundState] = useState(true);
   const [sheet, setSheet] = useState<null | "settings" | "host" | "rules" | "sos">(null);
   const prevPhase = useRef<string | null>(null);
+  // Live events already seen, to sound each one once when it starts.
+  const prevEvents = useRef<{ moon: boolean; shrink: boolean; treasure: string } | null>(null);
+  const [queued, setQueued] = useState(0);
   const lastMsg = useRef(0);
   // Highest radio message already handled; -1 until the first load (old ones never auto-play).
   const radioSeen = useRef(-1);
@@ -145,7 +161,7 @@ export default function App() {
       if (top > lastAlert.current && lastAlert.current !== 0 && top > buzzed && data.alerts[0]?.kind !== "JUMPSCARE") {
         buzz([200, 100, 200]);
         const kind = data.alerts[0]?.kind;
-        const sfx: Record<string, Sfx> = { PINGED: "ping", CAPTURED: "capture", PARTNER_DOWN: "alert", REVEALED: "whisper" };
+        const sfx: Record<string, Sfx> = { PINGED: "ping", CAPTURED: "capture", PARTNER_DOWN: "alert", REVEALED: "whisper", GHOST_LINE: "whisper", STILL: "alert", TREASURE: "mission" };
         play(sfx[kind] ?? "alert");
         try { localStorage.setItem(buzzedKey, String(top)); } catch {}
       }
@@ -154,6 +170,16 @@ export default function App() {
       const ph = data.game.phase;
       if (prevPhase.current && prevPhase.current !== ph && (ph === "HEAD_START" || (ph === "LIVE" && prevPhase.current === "HEAD_START"))) play("start");
       prevPhase.current = ph;
+      const ev = {
+        moon: !!data.game.moon?.on,
+        shrink: !!data.game.shrink && data.serverNow >= data.game.shrink.from && ph === "LIVE",
+        treasure: data.game.treasure ? `${data.game.treasure.place}|${data.game.treasure.until}` : "",
+      };
+      const was = prevEvents.current;
+      if (was && ev.moon && !was.moon) { play("start"); buzz([300, 120, 300, 120, 600]); }
+      else if (was && ev.shrink && !was.shrink) { play("alert"); buzz([200, 100, 200]); }
+      else if (was && ev.treasure && ev.treasure !== was.treasure) { play("mission"); buzz([60, 60, 60]); }
+      prevEvents.current = ev;
       setS(data);
       setAuth("in");
     } catch {
@@ -189,6 +215,14 @@ export default function App() {
       window.removeEventListener("pagehide", away);
     };
   }, [refresh]);
+
+  // Every new game is a new player: link this phone's notifications to whoever is playing now,
+  // also when coming back mid-game with the rejoin code (the lobby card isn't shown then).
+  const meId = s?.me.id;
+  useEffect(() => {
+    if (!meId || !("Notification" in window) || Notification.permission !== "granted") return;
+    subscribePush().catch(() => {});
+  }, [meId]);
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
@@ -228,6 +262,28 @@ export default function App() {
     setTimeout(() => setToastMsg(null), 4500);
   }, []);
   const closeScare = useCallback(() => setScare(null), []);
+
+  // Offline outbox: actions sent without signal leave as soon as the network is back.
+  useEffect(() => {
+    const sync = () => setQueued(outbox().length);
+    const flush = () => {
+      if (!outbox().length) return;
+      flushOutbox((q, data, err) => toast(`${q.label}: ${err ?? sentText(data)}`, !!err)).then(() => {
+        sync();
+        refresh();
+      });
+    };
+    const first = setTimeout(sync, 0);
+    window.addEventListener(OUTBOX_EVENT, sync);
+    window.addEventListener("online", flush);
+    const t = setInterval(flush, 4000);
+    return () => {
+      clearTimeout(first);
+      window.removeEventListener(OUTBOX_EVENT, sync);
+      window.removeEventListener("online", flush);
+      clearInterval(t);
+    };
+  }, [toast, refresh]);
 
   const lastId = messages.length ? messages[messages.length - 1].id : 0;
   useEffect(() => {
@@ -291,6 +347,7 @@ export default function App() {
   return (
     <div className="shell">
       <main className={`main ${(tab === "map" && fullNav) || tab === "comms" ? "flush" : ""}`}>{screen}</main>
+      {inGame && s.game.moon?.on && <div className="moonveil" aria-hidden="true" />}
       <header className="topbar glass">
         <AvatarPicker
           id={s.me.id}
@@ -332,10 +389,11 @@ export default function App() {
       <div className="banners">
         {phase === "PAUSED" && <div className="alert" style={{ background: "rgba(109,40,217,.88)" }}>Partita in pausa · aspettate l&apos;organizzatore</div>}
         {offline && <div className="alert">Connessione persa · riprovo</div>}
+        {queued > 0 && <div className="alert queued">📡 {queued === 1 ? "1 azione in coda" : `${queued} azioni in coda`} · partono appena torna la rete</div>}
         {inGame && geoError && <div className="alert" style={{ background: "rgba(109,40,217,.88)" }}>{geoError}</div>}
         {alert && (
-          <button type="button" className="alert" onClick={() => { setSeenAlert(alert.id); writeNum("cnh_alert_seen", alert.id); }}>
-            <span>{alert.body}</span><span className="ok">OK</span>
+          <button type="button" className={`alert ${alert.kind === "GHOST_LINE" ? "ghostline" : alert.kind === "TREASURE" ? "treasure" : ""}`} onClick={() => { setSeenAlert(alert.id); writeNum("cnh_alert_seen", alert.id); }}>
+            <span>{alert.kind === "GHOST_LINE" ? <>👻 <i>{alert.body}</i></> : alert.body}</span><span className="ok">OK</span>
           </button>
         )}
       </div>

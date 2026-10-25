@@ -117,7 +117,7 @@ function MissionCard({ m, s, fix, open, onToggle, refresh, toast }: {
     <div className={`quest ${done ? "done" : ""} ${near && !done ? "near" : ""} ${flash ? "flash" : ""}`}>
       <button type="button" onClick={onToggle}>
         <span className="qt">{m.title}</span>
-        <span className="qp num">{done ? "✓" : `+${pts(flash ? m.flashPoints! : m.points)}`}</span>
+        <span className="qp num">{done ? "✓" : `+${pts((flash ? m.flashPoints! : m.points) * (s.game.moon?.on ? s.game.moon.mult : 1))}`}</span>
         <span className="lbl">{m.special ? m.place : `${m.place} · ${m.d != null ? `${Math.round(m.d)} m` : "distanza ?"}${near && !done ? " · sei qui" : ""}`}</span>
         <span className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
           {flash && <span className="chip fr">Lampo ×2</span>}
@@ -185,6 +185,13 @@ export function Missions({ s, fix, refresh, toast }: { s: GameState; fix: Fix | 
         <span className="lbl">Missioni · {doneCount}/{f.missions.length} fatte</span>
         {!fix && <span className="chip">GPS…</span>}
       </div>
+      {s.game.moon?.on && <div className="ev moon"><b>🩸 Luna di Sangue: ogni missione vale ×{s.game.moon.mult}</b><span>Anche i tesori. Ma i cercatori vi vedono meglio.</span></div>}
+      {s.game.treasure && (
+        <div className="ev treasure">
+          <b>💰 Tesoro a {s.game.treasure.place} · +{pts(s.game.treasure.points * (s.game.moon?.on ? s.game.moon.mult : 1))}</b>
+          <span>Basta arrivarci entro 30 m: il primo fuggiasco lo prende. {fix ? `Sei a ${Math.round(dist(fix, s.game.treasure))} m.` : ""}</span>
+        </div>
+      )}
       {f.missions.some((m) => m.abandoned) && (
         <div className="notice danger-note">
           <b>Posti abbandonati:</b> dentro o fuori lo decidete voi, e spesso sono proprietà privata. Se entrate: mai da soli, torcia sempre accesa quando vi muovete, niente piani alti, tetti, silos o pavimenti che scricchiolano, guardate dove mettete i piedi (vetri, chiodi, buchi). Se dentro c&apos;è già qualcuno, uscite.

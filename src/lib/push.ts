@@ -39,6 +39,13 @@ async function send(playerIds: string[], title: string, body: string, tag: strin
   );
 }
 
+/** "Prova notifica": a push to this player after `delayS`, so there's time to close the app. Returns how many phones are subscribed. */
+export async function testPush(playerId: string, delayS = 10) {
+  const [{ n }] = await q<{ n: number }>("select count(*)::int as n from push_subs where player_id = $1", [playerId]);
+  if (n) after(() => new Promise((r) => setTimeout(r, delayS * 1000)).then(() => send([playerId], "🔔 Prova riuscita", "Le notifiche di Night Hunt arrivano anche con l'app chiusa.", "test")));
+  return n;
+}
+
 /** Sends after the response is out, so a slow push service never delays the game. */
 export function notify(playerIds: string[], title: string, body: string, tag = "cnh") {
   try {

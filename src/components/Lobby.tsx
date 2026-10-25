@@ -9,6 +9,7 @@ import { PumpkinCat } from "./PumpkinCat";
 import type { GameState } from "./types";
 import { post } from "./util";
 import { RoleCharacter } from "./GhostAnim";
+import { CardBack } from "./CardBack";
 import { AccountBox, profileKey, RankBadge, RankPanel, RecoverForm } from "./Rank";
 import { play } from "./sound";
 import { buzz } from "./util";
@@ -215,7 +216,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
         {recover && <RecoverForm toast={(text, bad = false) => setRecoverMsg({ text, bad })} onDone={() => setRecover(false)} />}
         {recoverMsg && <div className="notice" style={recoverMsg.bad ? { background: "var(--threat-soft)", color: "#ff5a62" } : undefined}>{recoverMsg.text}</div>}
       </div>
-      <p className="muted small legal-links"><a href="/regole">Regole e sicurezza</a> · <a href="/privacy">Privacy</a></p>
+      <p className="muted small legal-links"><a href="/classifica">🏆 Classifica di Bologna</a> · <a href="/regole">Regole e sicurezza</a> · <a href="/privacy">Privacy</a></p>
     </form>
   );
 }
@@ -267,9 +268,8 @@ function RoleCard({ role, revealKey }: { role: "HUNTER" | "FUGITIVE" | null; rev
     <>
       <button type="button" className={`rolecard ${open ? "open" : ""} ${shake ? "shake" : ""}`} onClick={reveal} disabled={!role} aria-label={role ? (open ? (hunter ? "Sei un cercatore" : "Sei un fuggiasco") : "Tocca per scoprire il tuo ruolo") : "Ruolo non ancora estratto"}>
         <span className="rc-inner">
-          <span className="rc-face rc-back">
-            <span className="rc-q">?</span>
-            <span className="rc-t">{role ? "Tocca per scoprire" : "In attesa dell'estrazione"}</span>
+          <span className={`rc-face rc-back ${role ? "ready" : "waiting"}`}>
+            <CardBack ready={!!role} label={role ? "Tocca per scoprire" : "In attesa dell'estrazione"} />
           </span>
           {role && (
             <span className={`rc-face rc-front ${hunter ? "hunter" : "fugitive"}`}>

@@ -59,6 +59,16 @@ export interface GameState {
     headStartMin: number; liveMin: number; missionsMode: "chill" | "abbandonati"; pausedAt: string | null;
     options: { live: number[]; headStart: number[]; radius: number[] };
     hostId: string | null; hostName: string | null; hostStale: boolean; captureBounty: number; zoneRadiusM: number;
+    /** Blood Moon window (server ms), null if the hunt is too short. */
+    moon: { from: number; to: number; on: boolean; mult: number } | null;
+    /** Last minutes, when the boundary closes in (server ms). */
+    shrink: { from: number; to: number } | null;
+    /** The boundary as it is right now (smaller while shrinking). */
+    boundaryNow: LngLat[];
+    /** The richest pair while at least two are in: catching them pays extra. */
+    bounty: { pairId: string; name: string; points: number } | null;
+    /** Treasure out right now, until someone takes it. */
+    treasure: { lat: number; lng: number; place: string; points: number; until: string } | null;
   };
   me: { id: string; name: string; role: Role | null; status: "ACTIVE" | "CAPTURED"; pairId: string | null; rejoinCode: string; spectator: boolean };
   /** Rank of this phone's profile (null for players without one). */
@@ -79,7 +89,7 @@ export interface GameState {
   alerts: Alert[];
   deletedIds: number[];
   /** Set for ghosts: they capture like hunters. */
-  ghostCapture?: { attemptsLeft: number; lockedS: number; stolen: number } | null;
+  ghostCapture?: { attemptsLeft: number; lockedS: number; stolen: number; lines: string[]; lineAt: string | null } | null;
   results: {
     fallen: { id: string; name: string; pair: string; lost: number; by: string; at: string; risen?: boolean }[];
     standings: {
@@ -100,6 +110,8 @@ export interface GameState {
     track: { sector: string; count: number; until: string } | null;
     attemptsLeft: number; lockedS: number;
     zones: { lat: number; lng: number; radiusM: number; ageS: number }[];
+    /** Fugitives who stood still too long: exact spot, for a few seconds. */
+    reveals: { lat: number; lng: number; until: string }[];
   };
   fugitive?: {
     password: string;

@@ -12,11 +12,13 @@ export interface MapPoint { id: string; lat: number; lng: number; kind: "me" | "
 export interface MapZone { lat: number; lng: number; radiusM: number; ageS: number }
 export interface MapQuest {
   id: string; lat: number; lng: number; title: string; points: number; done: boolean;
-  radiusM?: number; flash?: boolean; reward?: "ZOMBIE" | "GHOST_SHIELD" | "ECO" | null; abandoned?: boolean;
+  radiusM?: number; flash?: boolean; reward?: "ZOMBIE" | "GHOST_SHIELD" | "ECO" | null; abandoned?: boolean; treasure?: boolean;
 }
 
 interface Props {
   boundary: LngLat[];
+  /** The boundary while it shrinks (drawn in red, the original fades). */
+  liveBoundary?: LngLat[] | null;
   fix?: Fix | null;
   points?: MapPoint[];
   quests?: MapQuest[];
@@ -83,7 +85,7 @@ function circle(lat: number, lng: number, radiusM: number): [number, number][] {
   return out;
 }
 
-export default function MapView({ boundary, fix, points = [], quests = [], zones = [], sectorCounts = {}, tracked = null, meLook = "fugitive", focus = null, onMapClick }: Props) {
+export default function MapView({ boundary, liveBoundary = null, fix, points = [], quests = [], zones = [], sectorCounts = {}, tracked = null, meLook = "fugitive", focus = null, onMapClick }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<MLMap | null>(null);
   const [ready, setReady] = useState(false);
@@ -134,7 +136,7 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
         m.on("load", () => {
           m.addImage("hatch", hatchImage(), { pixelRatio: 2 });
           const empty = { type: "FeatureCollection" as const, features: [] };
-          for (const id of ["sectors", "sectorLabels", "boundary", "zones", "quests", "people"]) m.addSource(id, { type: "geojson", data: empty });
+          for (const id of ["sectors", "sectorLabels", "boundary", "liveBoundary", "zones", "quests", "people"]) m.addSource(id, { type: "geojson", data: empty });
           m.addLayer({ id: "sector-hatch", type: "fill", source: "sectors", filter: ["get", "hot"], paint: { "fill-pattern": "hatch", "fill-opacity": 0.8 } });
           m.addLayer({ id: "sector-line", type: "line", source: "sectors", paint: { "line-color": "#4A4440", "line-width": 1, "line-dasharray": [3, 3] } });
           m.addLayer({ id: "sector-ping", type: "line", source: "sectors", filter: ["get", "pinged"], paint: { "line-color": "#E50914", "line-width": 2 } });
@@ -145,6 +147,9 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
             paint: { "text-color": ["case", ["get", "hot"], "#FFFFFF", ["get", "pinged"], "#E50914", "#9A938C"], "text-halo-color": "#0B0B0C", "text-halo-width": 2 },
           });
           m.addLayer({ id: "boundary-line", type: "line", source: "boundary", paint: { "line-color": "#a970ff", "line-width": 3 } });
+          // Battle royale: the shrinking line, pulsing red over a faded original.
+          m.addLayer({ id: "live-boundary-glow", type: "line", source: "liveBoundary", paint: { "line-color": "#ff2040", "line-width": 10, "line-opacity": 0.25, "line-blur": 6 } });
+          m.addLayer({ id: "live-boundary-line", type: "line", source: "liveBoundary", paint: { "line-color": "#ff3a50", "line-width": 3 } });
           // Fugitive zones (hunters only): a blurred circle, fainter when the GPS fix is old.
           m.addLayer({
             id: "zone-fill", type: "fill", source: "zones",
@@ -233,6 +238,11 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
     set("sectors", s.polys);
     set("sectorLabels", s.labels);
     set("boundary", { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [...boundary, boundary[0]] } });
+    set("liveBoundary", liveBoundary
+      ? { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [...liveBoundary, liveBoundary[0]] } }
+      : { type: "FeatureCollection", features: [] });
+    m.setPaintProperty("boundary-line", "line-opacity", liveBoundary ? 0.3 : 1);
+    m.setPaintProperty("boundary-line", "line-dasharray", liveBoundary ? [2, 2] : [1, 0]);
     set("quests", {
       type: "FeatureCollection",
       features: quests.map((q) => ({ type: "Feature", properties: { done: q.done, title: q.title, points: q.points }, geometry: { type: "Point", coordinates: [q.lng, q.lat] } })),
@@ -247,12 +257,12 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
       type: "FeatureCollection",
       features: people.map((p) => ({ type: "Feature", properties: { kind: p.kind, label: p.label ?? "" }, geometry: { type: "Point", coordinates: [p.lng, p.lat] } })),
     });
-  }, [ready, boundary, fix, points, quests, zones, sectorCounts, tracked]);
+  }, [ready, boundary, liveBoundary, fix, points, quests, zones, sectorCounts, tracked]);
 
   useEffect(() => {
     const f = fx.current;
     if (!f || !fxReady) return;
-    f.setQuests(quests.map((q) => ({ id: q.id, lat: q.lat, lng: q.lng, radiusM: q.radiusM ?? 40, done: q.done, flash: !!q.flash, reward: q.reward ?? null, abandoned: !!q.abandoned })));
+    f.setQuests(quests.map((q) => ({ id: q.id, lat: q.lat, lng: q.lng, radiusM: q.radiusM ?? 40, done: q.done, flash: !!q.flash, reward: q.reward ?? null, abandoned: !!q.abandoned, treasure: !!q.treasure })));
     const people: import("./map3d").Person3D[] = points
       .filter((p) => p.kind === "partner")
       .map((p) => ({ id: `partner-${p.id}`, lat: p.lat, lng: p.lng, kind: "partner", look: "fugitive", fixAt: p.fixAt ? Date.parse(p.fixAt) : undefined }));

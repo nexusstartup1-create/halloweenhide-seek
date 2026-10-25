@@ -268,4 +268,39 @@ do $$ begin
 end $$;
 create index if not exists alerts_player_at on alerts(player_id, at);
 create index if not exists attempts_hunter_at on capture_attempts(hunter_id, at);
+
+-- ---------- live events: blood moon, shrinking zone, campers, treasures, ghost whispers ----------
+-- One row per event already announced in a round (kind: MOON, SHRINK, T<slot>).
+create table if not exists game_events (
+  game_id int not null,
+  round int not null,
+  kind text not null,
+  at timestamptz not null default now(),
+  primary key (game_id, round, kind)
+);
+-- Where a fugitive has been standing since when (reset after moving STILL_RADIUS_M).
+alter table players add column if not exists still_lat double precision;
+alter table players add column if not exists still_lng double precision;
+alter table players add column if not exists still_since timestamptz;
+alter table players add column if not exists ghost_line_at timestamptz;
+create table if not exists reveals (
+  id bigserial primary key,
+  game_id int not null,
+  player_id text not null,
+  lat double precision not null,
+  lng double precision not null,
+  at timestamptz not null default now(),
+  until timestamptz not null
+);
+create index if not exists reveals_game_until on reveals(game_id, until);
+create table if not exists treasures (
+  game_id int not null,
+  round int not null,
+  slot int not null,
+  pair_id text not null,
+  player_id text,
+  points int not null,
+  at timestamptz not null default now(),
+  primary key (game_id, round, slot)
+);
 `;

@@ -4,7 +4,7 @@ import { bearing, compass, distanceM } from "@/lib/geo";
 import { HoldButton } from "./HoldButton";
 import { Sheet } from "./Panels";
 import type { Fix, GameState } from "./types";
-import { ago, post } from "./util";
+import { ago, post, postOrQueue } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
 type Sos = GameState["sos"][number];
@@ -27,7 +27,8 @@ export function SosSheet({ fix, onClose, onSent, toast }: { fix: Fix | null; onC
   const send = async () => {
     setBusy(true);
     try {
-      await post("/api/sos", { action: "send", lat: fix?.lat, lng: fix?.lng, acc: fix?.acc });
+      const r = await postOrQueue("/api/sos", { action: "send", lat: fix?.lat, lng: fix?.lng, acc: fix?.acc }, "SOS", 30 * 60);
+      if (!r) toast("Nessuna rete: l'SOS parte appena torna il segnale. Se è un'emergenza vera chiama subito il 112.", true);
       onSent();
       onClose();
     } catch (e) {

@@ -24,6 +24,45 @@ export const FLASH_MULT = 2;
 export const ZONE_RADIUS_M = 80;
 export const ZONE_MAX_OFFSET_M = 55;
 export const ZONE_REFRESH_S = 60;
+/**
+ * Blood Moon: BLOOD_MOON_BEFORE_END_MIN before the end, for BLOOD_MOON_LEN_MIN, the hunters' circles shrink
+ * to BLOOD_MOON_ZONE_FACTOR of their size and missions and treasures pay BLOOD_MOON_MULT×.
+ */
+export const BLOOD_MOON_BEFORE_END_MIN = 30;
+export const BLOOD_MOON_LEN_MIN = 5;
+export const BLOOD_MOON_ZONE_FACTOR = 0.5;
+export const BLOOD_MOON_MULT = 2;
+/** Battle royale: in the last SHRINK_LAST_MIN the boundary shrinks towards its centre, down to SHRINK_TO of its size. */
+export const SHRINK_LAST_MIN = 15;
+export const SHRINK_TO = 0.5;
+/** A fugitive who stays within STILL_RADIUS_M for STILL_MIN of live play shows up on the hunters' map for REVEAL_S. */
+export const STILL_MIN = 10;
+export const STILL_RADIUS_M = 40;
+export const REVEAL_S = 45;
+/** The richest pair (while at least two are in) carries a price on its head: TOP_BOUNTY extra per capture. */
+export const TOP_BOUNTY = 500;
+/**
+ * Treasures: every TREASURE_EVERY_MIN of live play one appears at a public spot of the zone (a mission place)
+ * for TREASURE_LEN_MIN. The first fugitive within TREASURE_RADIUS_M takes its points for the pair.
+ */
+export const TREASURE_EVERY_MIN = 8;
+export const TREASURE_LEN_MIN = 6;
+export const TREASURE_RADIUS_M = 30;
+export const TREASURE_POINTS = [300, 400, 500];
+/** What a ghost can whisper to a random free fugitive, once every GHOST_LINE_COOLDOWN_S. */
+export const GHOST_LINES = [
+  "Ti vedo…",
+  "Sono dietro di te.",
+  "Non sei solo.",
+  "Hai sentito quel rumore?",
+  "Conto fino a dieci…",
+  "Guarda in alto.",
+  "Fa freddo qui, vero?",
+  "Ho trovato le tue impronte.",
+  "Il tuo compagno ha paura.",
+  "Corri.",
+];
+export const GHOST_LINE_COOLDOWN_S = 120;
 /** A host who hasn't opened the app for this long can be replaced by anyone. */
 export const HOST_STALE_MIN = 5;
 /** Link to the organizers' WhatsApp group for disputes. Empty hides the button. */

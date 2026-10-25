@@ -48,6 +48,13 @@ export function distanceToEdgeM(lng: number, lat: number, poly: LngLat[]) {
   return best;
 }
 
+/** The polygon scaled by `k` around the average of its vertices (k = 1: unchanged). */
+export function scaleRing(poly: LngLat[], k: number): LngLat[] {
+  const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length;
+  const cy = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+  return poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k]);
+}
+
 export function bbox(poly: LngLat[]) {
   const xs = poly.map((p) => p[0]);
   const ys = poly.map((p) => p[1]);

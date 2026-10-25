@@ -13,7 +13,7 @@ import { makePumpkin } from "./pumpkin3d";
 import type { CustomLayerInterface, Map as MLMap, MercatorCoordinate as MC } from "maplibre-gl";
 
 export type Look = "fugitive" | "hunter" | "ghost";
-export interface Quest3D { id: string; lat: number; lng: number; radiusM: number; done: boolean; flash: boolean; reward: "ZOMBIE" | "GHOST_SHIELD" | "ECO" | null; abandoned: boolean }
+export interface Quest3D { id: string; lat: number; lng: number; radiusM: number; done: boolean; flash: boolean; reward: "ZOMBIE" | "GHOST_SHIELD" | "ECO" | null; abandoned: boolean; treasure?: boolean }
 /** `acc`: GPS accuracy in metres (you only). `fixAt`: when the position was taken, ms (partner only). */
 export interface Person3D { id: string; lat: number; lng: number; kind: "me" | "partner"; look: Look; acc?: number; fixAt?: number }
 
@@ -26,6 +26,7 @@ export interface Zone3D { lat: number; lng: number; radiusM: number; ageS: numbe
 
 const COLORS = {
   quest: new THREE.Color("#ff6a00"),
+  treasure: new THREE.Color("#ffc928"),
   flash: new THREE.Color("#ff2848"),
   zombie: new THREE.Color("#6dff7a"),
   reward: new THREE.Color("#b48cff"),
@@ -253,7 +254,7 @@ export class Map3D {
   }
 
   private questEntity(q: Quest3D): Entity {
-    const color = q.done ? COLORS.done : q.flash ? COLORS.flash : q.reward === "ZOMBIE" ? COLORS.zombie : q.reward ? COLORS.reward : q.abandoned ? COLORS.abandoned : COLORS.quest;
+    const color = q.treasure ? COLORS.treasure : q.done ? COLORS.done : q.flash ? COLORS.flash : q.reward === "ZOMBIE" ? COLORS.zombie : q.reward ? COLORS.reward : q.abandoned ? COLORS.abandoned : COLORS.quest;
     const g = new THREE.Group();
     g.position.copy(this.local(q.lat, q.lng));
     const disposables: { dispose: () => void }[] = [];
@@ -290,10 +291,10 @@ export class Map3D {
         g.add(this.flat(keep(new THREE.PlaneGeometry(q.radiusM * 2.2, q.radiusM * 2.2)), r, 0.5 + i * 0.05));
       }
     }
-    const speed = q.flash ? 1.8 : 1;
+    const speed = q.flash || q.treasure ? 1.8 : 1;
     const seed = (q.lat * 1000 + q.lng * 1000) % 7;
     return {
-      key: `${q.done}|${q.flash}|${q.reward}|${q.abandoned}|${q.radiusM}`,
+      key: `${q.done}|${q.flash}|${q.reward}|${q.abandoned}|${q.radiusM}|${q.treasure}`,
       group: g,
       marker,
       update: (t) => {
@@ -302,7 +303,7 @@ export class Map3D {
         gem.position.y = (q.done ? 6 : 16) + Math.sin(tt * 1.6) * (q.done ? 0.5 : 1.8);
         if (beam) {
           beam.uniforms.uTime.value = tt;
-          beam.uniforms.uPower.value = q.flash ? 0.75 + 0.25 * Math.sin(tt * 8) : 1;
+          beam.uniforms.uPower.value = q.flash || q.treasure ? 0.75 + 0.25 * Math.sin(tt * 8) : 1;
         }
         rings.forEach((r, i) => (r.uniforms.uProgress.value = (tt * 0.45 + i / rings.length) % 1));
       },
@@ -548,7 +549,7 @@ export class Map3D {
   }
 
   setQuests(list: Quest3D[]) {
-    this.sync(this.quests, list, (q) => this.questEntity(q), (q) => `${q.done}|${q.flash}|${q.reward}|${q.abandoned}|${q.radiusM}`);
+    this.sync(this.quests, list, (q) => this.questEntity(q), (q) => `${q.done}|${q.flash}|${q.reward}|${q.abandoned}|${q.radiusM}|${q.treasure}`);
     this.map.triggerRepaint();
   }
 

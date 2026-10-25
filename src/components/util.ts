@@ -14,11 +14,75 @@ export function ago(ms: number) {
   return `${Math.floor(s / 3600)} h fa`;
 }
 
+/** No network at all (as opposed to the server saying no). */
+export class OfflineError extends Error {}
+
 export async function post<T = unknown>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch {
+    throw new OfflineError("Nessuna connessione. Riprova appena torna il segnale.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? "Errore di rete. Riprova.");
   return data as T;
+}
+
+/* ---------------- outbox: actions sent while the signal drops wait on the phone ---------------- */
+
+export interface Queued { id: string; url: string; body: unknown; label: string; at: number; ttlS: number }
+const OUTBOX = "cnh_outbox";
+export const OUTBOX_EVENT = "cnh-outbox";
+
+export function outbox(): Queued[] {
+  try { return JSON.parse(localStorage.getItem(OUTBOX) ?? "[]") as Queued[]; } catch { return []; }
+}
+function saveOutbox(list: Queued[]) {
+  try { localStorage.setItem(OUTBOX, JSON.stringify(list)); } catch {}
+  window.dispatchEvent(new Event(OUTBOX_EVENT));
+}
+
+/**
+ * Like post, but with no signal the action waits on the phone and leaves by itself when the network is
+ * back (see flushOutbox). Returns null when queued. `ttlS`: after this long it's dropped, too late to matter.
+ */
+export async function postOrQueue<T = unknown>(url: string, body: unknown, label: string, ttlS = 120): Promise<T | null> {
+  try {
+    return await post<T>(url, body);
+  } catch (e) {
+    if (!(e instanceof OfflineError)) throw e;
+    saveOutbox([...outbox(), { id: `${Date.now()}-${Math.random()}`, url, body, label, at: Date.now(), ttlS }]);
+    return null;
+  }
+}
+
+let flushing = false;
+/** Sends what's waiting, oldest first; stops at the first sign the network is still down. */
+export async function flushOutbox(done: (q: Queued, data: unknown, error: string | null) => void) {
+  if (flushing) return;
+  flushing = true;
+  try {
+    for (const item of outbox()) {
+      const drop = () => saveOutbox(outbox().filter((x) => x.id !== item.id));
+      if (Date.now() - item.at > item.ttlS * 1000) {
+        drop();
+        done(item, null, "troppo tardi, non inviato");
+        continue;
+      }
+      try {
+        const data = await post(item.url, item.body);
+        drop();
+        done(item, data, null);
+      } catch (e) {
+        if (e instanceof OfflineError) break;
+        drop();
+        done(item, null, (e as Error).message);
+      }
+    }
+  } finally {
+    flushing = false;
+  }
 }
 
 /** Vibration: can be turned off by the player, and never more than once every 3 seconds. */

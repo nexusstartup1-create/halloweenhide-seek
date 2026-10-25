@@ -10,12 +10,13 @@ import { TcgCard } from "./TcgCard";
 import { HoldButton } from "./HoldButton";
 import { Sheet } from "./Panels";
 import { Icon } from "./Icons";
-import MapView, { sectorCenter, type MapPoint } from "./MapView";
+import MapView, { sectorCenter, type MapPoint, type MapQuest } from "./MapView";
 import { Replay } from "./Replay";
 import { RankAward } from "./Rank";
 import { MapLegend, type LegendTarget, type LegendTargets } from "./MapLegend";
 import type { Card, Channel, Fix, GameState, Message } from "./types";
-import { CARD_INFO, ago, buzz, clock, post, pts } from "./util";
+import { LiveEvents } from "./LiveEvents";
+import { CARD_INFO, ago, buzz, clock, post, postOrQueue, pts } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
 
@@ -311,6 +312,7 @@ export function FugitiveHud({ s, now }: { s: GameState; now: number }) {
   return (
     <div className="pad">
       <PhaseTimer s={s} now={now} />
+      <LiveEvents s={s} now={now} side="fugitive" />
       {shield && (
         <button type="button" className="notice" style={{ border: 0, textAlign: "left" }} onClick={() => setHideShield(false)}>
           Ghost Shield · {clock(+new Date(shield.activeUntil!) - now)} · tocca per mostrarlo
@@ -406,10 +408,29 @@ export function Ghost({ s, now, refresh, toast }: { s: GameState; now: number; r
     }
   };
   const left = card?.cooldownUntil ? +new Date(card.cooldownUntil) - now : 0;
+  const lines = s.ghostCapture?.lines ?? [];
+  const lineLeft = s.ghostCapture?.lineAt ? +new Date(s.ghostCapture.lineAt) - now : 0;
+  const speak = async (i: number) => {
+    setBusy(true);
+    try {
+      const r = await postOrQueue<{ message: string }>("/api/ghostline", { line: i }, "Voce nel buio", 60);
+      if (!r) toast("Nessuna rete: la frase parte appena torna il segnale.");
+      else {
+        playSfx("whisper");
+        toast(r.message);
+        refresh();
+      }
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="pad">
       <GhostIntro playerId={`${s.me.id}-r${s.game.round}`} />
       <PhaseTimer s={s} now={now} />
+      <LiveEvents s={s} now={now} side="hunter" />
       <div className="box ghost">
         <GhostLoop />
         <span className="lbl">Sei stato catturato</span>
@@ -438,6 +459,22 @@ export function Ghost({ s, now, refresh, toast }: { s: GameState; now: number; r
           </div>
         </div>
       )}
+      {lines.length > 0 && (
+        <div className="box ghostlines">
+          <span className="lbl">Voce nel buio</span>
+          <p className="small muted">
+            Manda una frase a un fuggiasco a caso (mai il tuo ex compagno): gli arriva sul telefono e non sa chi sei.{" "}
+            {lineLeft > 0 ? <b>Di nuovo tra {clock(lineLeft)}.</b> : "Una ogni 2 minuti."}
+          </p>
+          <div className="glines">
+            {lines.map((l, i) => (
+              <button key={l} type="button" className="chip glass" disabled={busy || lineLeft > 0 || s.game.phase !== "LIVE"} onClick={() => speak(i)}>
+                {l}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {partner && (
         <div className="row box" style={{ flexDirection: "row" }}>
           <span className="lbl">{partner.name}</span>
@@ -457,6 +494,7 @@ export function HunterHud({ s, now }: { s: GameState; now: number }) {
   return (
     <div className="pad">
       <PhaseTimer s={s} now={now} />
+      <LiveEvents s={s} now={now} side="hunter" />
       <div className="box a">
         <div className="row"><span className="lbl">Punti rubati</span><span className="chip fa">Posizione {h.rank}/{h.hunters.length}</span></div>
         <div className="big a">{pts(h.stolen)}</div>
@@ -490,7 +528,7 @@ export function HunterHud({ s, now }: { s: GameState; now: number }) {
 /* ---------------- capture ---------------- */
 
 type Verdict =
-  | { result: "OK"; stolen: number; targetName: string; pairName: string; partnerActive: boolean; poolLeft: number }
+  | { result: "OK"; stolen: number; targetName: string; pairName: string; partnerActive: boolean; poolLeft: number; bounty?: boolean }
   | { result: "WRONG"; attemptsLeft: number }
   | { result: "ALREADY"; targetName: string; capturedBy: string }
   | { result: "SHIELDED"; shieldLeftS: number }
@@ -512,7 +550,12 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
     if (!pw.trim() || busy) return;
     setBusy(true);
     try {
-      const r = await post<Verdict>("/api/capture", { password: pw });
+      const r = await postOrQueue<Verdict>("/api/capture", { password: pw }, "Cattura", 90);
+      if (!r) {
+        toast("Nessuna rete: la cattura parte appena torna il segnale (entro 90 s).");
+        setPw("");
+        return;
+      }
       setV(r);
       if (r.result === "OK") {
         buzz([80, 60, 300]);
@@ -536,6 +579,7 @@ export function Capture({ s, refresh, toast }: { s: GameState; refresh: () => vo
           <div className="mega" style={{ fontSize: 48 }}>{v.targetName}</div>
           <span className="title">{v.pairName}</span>
           <div className="row"><span className="lbl">Rubati</span><span className="big a">+{pts(v.stolen)}</span></div>
+          {v.bounty && <span className="chip a">🎯 Taglia incassata</span>}
           <span className="lbl">{v.partnerActive ? `Il partner è ancora libero · pool rimasto ${pts(v.poolLeft)}` : "Coppia eliminata"}</span>
         </div>
         <button type="button" className="btn" onClick={() => setV(null)}>Nuova cattura</button>
@@ -623,9 +667,9 @@ export function Deck({ s, now, refresh, toast }: { s: GameState; now: number; re
     if (!card || busy) return;
     setBusy(true);
     try {
-      const r = await post<{ message: string }>("/api/cards", { cardId: card.id, target });
+      const r = await postOrQueue<{ message: string }>("/api/cards", { cardId: card.id, target }, CARD_INFO[card.code].name, 60);
       playSfx(card.code === "RADAR_PING" ? "ping" : "card");
-      toast(r.message);
+      toast(r ? r.message : "Nessuna rete: la carta si attiva appena torna il segnale.");
       setSel(null);
       setTarget(null);
       refresh();
@@ -689,33 +733,39 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
   }, [s.hunter?.pings]);
   const points = useMemo<MapPoint[]>(() => {
     const p = s.fugitive?.partner;
-    return p && p.status === "ACTIVE" && p.lat != null && p.lng != null ? [{ id: "partner", lat: p.lat, lng: p.lng, kind: "partner", label: p.distanceM != null ? `${p.name} · ${p.distanceM} m` : p.name, fixAt: p.fixAt }] : [];
-  }, [s.fugitive?.partner]);
+    const out: MapPoint[] = p && p.status === "ACTIVE" && p.lat != null && p.lng != null ? [{ id: "partner", lat: p.lat, lng: p.lng, kind: "partner", label: p.distanceM != null ? `${p.name} · ${p.distanceM} m` : p.name, fixAt: p.fixAt }] : [];
+    // Fugitives caught standing still: their exact spot, for a few seconds.
+    (s.hunter?.reveals ?? []).forEach((r, i) => out.push({ id: `still${i}`, lat: r.lat, lng: r.lng, kind: "fugitive", label: "FERMO QUI" }));
+    return out;
+  }, [s.fugitive?.partner, s.hunter?.reveals]);
   const meLook = s.me.role === "HUNTER" ? "hunter" : s.me.status === "CAPTURED" ? "ghost" : "fugitive";
+  const shrinking = g.boundaryNow[0][0] !== g.boundary[0][0] || g.boundaryNow[0][1] !== g.boundary[0][1];
   const [focus, setFocus] = useState<{ lng: number; lat: number; zoom: number; n: number } | null>(null);
   const goTo = (t: LegendTarget) => setFocus((f) => ({ ...t, n: (f?.n ?? 0) + 1 }));
 
-  const quests = useMemo(
-    () =>
-      (s.fugitive?.missions ?? []).filter((m) => !m.special).map((m) => ({
-        id: m.id, lat: m.lat, lng: m.lng, title: m.place, points: m.points, done: m.proofId != null,
-        radiusM: m.radiusM, flash: m.flashUntil != null, reward: m.reward ?? null, abandoned: !!m.abandoned,
-      })),
-    [s.fugitive?.missions],
-  );
+  const treasure = g.treasure;
+  const quests = useMemo(() => {
+    const list: MapQuest[] = (s.fugitive?.missions ?? []).filter((m) => !m.special).map((m) => ({
+      id: m.id, lat: m.lat, lng: m.lng, title: m.place, points: m.points, done: m.proofId != null,
+      radiusM: m.radiusM, flash: m.flashUntil != null, reward: m.reward ?? null, abandoned: !!m.abandoned,
+    }));
+    // The treasure is on everyone's map: fugitives run for it, hunters wait for them there.
+    if (treasure) list.push({ id: "treasure", lat: treasure.lat, lng: treasure.lng, title: `Tesoro · ${treasure.place}`, points: treasure.points, done: false, radiusM: 30, treasure: true });
+    return list;
+  }, [s.fugitive?.missions, treasure]);
 
   // Where each legend symbol is right now (nearest one to you), for "Mostra sulla mappa".
   const targets = useMemo<LegendTargets>(() => {
     const out: LegendTargets = {};
     const near = (a: { lat: number; lng: number }) => (fix ? (a.lat - fix.lat) ** 2 + ((a.lng - fix.lng) * 0.71) ** 2 : 0);
     const kindOf = (q: (typeof quests)[number]) =>
-      q.done ? "done" : q.flash ? "flash" : q.reward === "ZOMBIE" ? "zombie" : q.reward ? "reward" : q.abandoned ? "abandoned" : "quest";
+      q.treasure ? "treasure" : q.done ? "done" : q.flash ? "flash" : q.reward === "ZOMBIE" ? "zombie" : q.reward ? "reward" : q.abandoned ? "abandoned" : "quest";
     for (const q of [...quests].sort((a, b) => near(a) - near(b))) out[kindOf(q)] ??= { lat: q.lat, lng: q.lng, zoom: 17 };
     if (fix) {
       out.me = { lat: fix.lat, lng: fix.lng, zoom: 17 };
       if (fix.acc > 12) out.acc = { lat: fix.lat, lng: fix.lng, zoom: 16.5 };
     }
-    const p = points[0];
+    const p = points.find((x) => x.kind === "partner");
     if (p) out[p.fixAt && clockNow() - Date.parse(p.fixAt) > 120_000 ? "partnerOld" : "partner"] = { lat: p.lat, lng: p.lng, zoom: 17 };
     const zs = [...(s.hunter?.zones ?? [])].sort((a, b) => a.ageS - b.ageS);
     const hot = zs.find((z) => z.ageS < 90), old = zs.findLast((z) => z.ageS >= 90);
@@ -726,25 +776,32 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
       return c ? { lng: c[0], lat: c[1], zoom: 15.5 } : undefined;
     };
     out.ping = sector(Object.keys(counts).find((k) => counts[k] > 0));
+    const still = s.hunter?.reveals[0];
+    if (still) out.still = { lat: still.lat, lng: still.lng, zoom: 17 };
     out.track = sector(s.hunter?.track?.sector);
     const xs = g.boundary.map((b) => b[0]), ys = g.boundary.map((b) => b[1]);
     out.boundary = out.sectors = { lng: (Math.min(...xs) + Math.max(...xs)) / 2, lat: (Math.min(...ys) + Math.max(...ys)) / 2, zoom: 14.3 };
+    if (shrinking) out.shrink = out.boundary;
     for (const k of Object.keys(out) as (keyof LegendTargets)[]) if (!out[k]) delete out[k];
     return out;
-  }, [quests, fix, points, s.hunter?.zones, s.hunter?.track?.sector, counts, g.boundary]);
+  }, [quests, fix, points, s.hunter?.zones, s.hunter?.reveals, s.hunter?.track?.sector, counts, g.boundary, shrinking]);
 
   let edge: string | null = null;
   if (fix) {
-    const inside = pointIn(fix.lng, fix.lat, g.boundary);
-    edge = inside ? null : "Sei fuori dai confini. Rientra entro 60 s.";
+    const inside = pointIn(fix.lng, fix.lat, g.boundaryNow);
+    edge = inside ? null : shrinking ? "La zona si è ristretta e sei fuori. Rientra entro 60 s." : "Sei fuori dai confini. Rientra entro 60 s.";
   }
 
   return (
     <div className="mapfull">
-      <MapView boundary={g.boundary} fix={fix} points={points} quests={quests} zones={s.hunter?.zones ?? []} sectorCounts={counts} tracked={s.hunter?.track?.sector ?? null} meLook={meLook} focus={focus} />
+      <MapView boundary={g.boundary} liveBoundary={shrinking ? g.boundaryNow : null} fix={fix} points={points} quests={quests} zones={s.hunter?.zones ?? []} sectorCounts={counts} tracked={s.hunter?.track?.sector ?? null} meLook={meLook} focus={focus} />
       <div className="mapover top">
         {geoError && <div className="alert">{geoError}</div>}
         {edge && <div className="alert">{edge}</div>}
+        {g.moon?.on && <span className="chip glass evchip moon">🩸 Luna di Sangue</span>}
+        {shrinking && <span className="chip glass evchip shrink">⚠️ La zona si restringe</span>}
+        {treasure && <span className="chip glass evchip treasure">💰 Tesoro · {treasure.place}</span>}
+        {s.hunter?.reveals.length ? <span className="chip glass evchip moon">👁️ Fuggiasco fermo sulla mappa!</span> : null}
         {s.hunter?.pings.length ? <span className="chip r glass">Ping attivo · {s.hunter.pings[0].hunter}</span> : null}
         {s.hunter?.track && <span className="chip fa">Traccia {s.hunter.track.sector}</span>}
         {s.hunter && s.game.phase === "LIVE" && <span className="chip glass">{s.hunter.zones.length} zone · in tempo reale</span>}
@@ -977,7 +1034,7 @@ export function Comms({ s, messages, refresh, toast }: { s: GameState; messages:
     e.preventDefault();
     if (!text.trim()) return;
     try {
-      await post("/api/messages", { channel, text });
+      if (!(await postOrQueue("/api/messages", { channel, text }, "Messaggio", 600))) toast("Nessuna rete: il messaggio parte appena torna il segnale.");
       setText("");
       refresh();
     } catch (err) {

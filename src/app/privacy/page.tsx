@@ -29,6 +29,7 @@ export default function Privacy() {
         <li><b>Messaggi di testo e vocali</b> nella chat e nella radio: li vede chi è nel canale o nel gruppo a cui scrivi.</li>
         <li><b>SOS</b>: se mandi un SOS, la tua <b>posizione esatta</b> va a tutti i giocatori della partita, per poterti aiutare.</li>
         <li><b>Rango</b>: i punti rango restano legati al tuo telefono con un codice casuale. Se scegli di proteggerlo, salviamo il <b>nome account</b> che inventi e la password <b>solo cifrata</b> (nessuno può leggerla).</li>
+        <li><b>Classifica di Bologna</b>: se arrivi almeno una volta sul podio, il tuo <b>nome di gioco</b>, il rango e i podi compaiono nella classifica pubblica su questo sito. Con &quot;Cancella i miei dati&quot; sparisci anche da lì.</li>
         <li><b>Notifiche</b>: se le attivi, salviamo l&apos;indirizzo tecnico del tuo telefono per mandartele.</li>
         <li><b>Un cookie tecnico</b> per tenerti collegato, e alcune preferenze salvate solo sul tuo telefono (suoni, vibrazione, guida già vista). Nessun cookie di tracciamento o pubblicità.</li>
       </ul>

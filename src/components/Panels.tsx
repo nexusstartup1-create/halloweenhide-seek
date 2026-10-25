@@ -5,6 +5,7 @@ import { Avatar } from "./Avatar";
 import { HoldButton } from "./HoldButton";
 import { ShareGame } from "./Lobby";
 import type { GameState } from "./types";
+import { PushCheck } from "./PhoneSetup";
 import { ago, clock, post, pts } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
@@ -53,6 +54,7 @@ export function SettingsSheet({ onClose, sound, setSound, vibe, setVibe, glassCl
         <Toggle label="Vibrazione" on={vibe} onChange={setVibe} />
         <Toggle label="Vetro trasparente" on={glassClear} onChange={setGlassClear} />
       </div>
+      <PushCheck />
       <div className="box">
         <span className="lbl">Radio · voce dei tuoi messaggi</span>
         <div className="seg" role="radiogroup" aria-label="Effetto voce radio">
@@ -208,7 +210,13 @@ export function RulesSheet({ s, onClose }: { s: GameState; onClose: () => void }
         <h4>Le squadre</h4>
         <p>I ruoli <b>non si scelgono</b>: l&apos;organizzatore li estrae a sorte in lobby. <b>Cercatori</b> da soli contro <b>fuggiaschi</b> in coppia. Il compagno invece lo scegliete voi: quando due fuggiaschi si scelgono a vicenda sono una coppia; chi resta da solo viene accoppiato a caso. Ogni coppia parte con 1.500 punti.</p>
         <h4>La partita</h4>
-        <p>{g.headStartMin} minuti di vantaggio ai fuggiaschi, poi {g.liveMin} minuti di caccia a {g.zoneName}. Restate dentro il confine arancione sulla mappa.</p>
+        <p>{g.headStartMin} minuti di vantaggio ai fuggiaschi, poi {g.liveMin} minuti di caccia a {g.zoneName}. Restate dentro il confine viola sulla mappa.</p>
+        <h4>Eventi della notte</h4>
+        <p><b>🩸 Luna di Sangue:</b> 30 minuti prima della fine, per 5 minuti, i cercatori vedono i cerchi grandi la metà e missioni e tesori valgono doppio.</p>
+        <p><b>⚠️ Zona che si restringe:</b> negli ultimi 15 minuti il confine si stringe verso il centro fino a metà. Vale la linea rossa: chi resta fuori più di 60 s viene segnalato.</p>
+        <p><b>💰 Tesori:</b> ogni 8 minuti ne compare uno in un posto pubblico della zona, per 6 minuti. Il primo fuggiasco che arriva entro 30 m prende 300–500 punti per la coppia. Lo vedono anche i cercatori.</p>
+        <p><b>👁️ Chi sta fermo si vede:</b> un fuggiasco che resta nello stesso punto (40 m) per 10 minuti compare sulla mappa dei cercatori, nel punto esatto, per 45 secondi. La Nebbia lo protegge.</p>
+        <p><b>🎯 Taglia:</b> la coppia più ricca (se ne restano almeno due) vale {pts(500)} punti in più a ogni cattura.</p>
         <h4>Fuggiaschi</h4>
         <p>Fate le missioni ({g.missionsMode === "abbandonati" ? "posti abbandonati" : "chill"}): una foto o un video sul posto, entro 40 m. Ogni 20 minuti una <b>missione lampo</b> vale doppio. I cercatori vedono la vostra zona come un cerchio di {g.zoneRadiusM} m.</p>
         <h4>Cercatori</h4>
@@ -218,11 +226,11 @@ export function RulesSheet({ s, onClose }: { s: GameState; onClose: () => void }
         <p>Alcune missioni, segnate con 🃏, <b>sbloccano una carta</b> per chi carica la prova: Ghost Shield, Eco o la rara <b>Zombie</b>, che da fantasma ti fa risorgere (password nuova, 3 minuti di immunità, una volta sola).</p>
         <p><b>Agguati e scherzetti:</b> missioni senza un posto fisso. Gli agguati valgono solo se un cercatore è davvero vicino quando inviate la prova; quelle con i passanti solo con chi accetta di giocare. Tutti hanno anche una carta <b>Jumpscare</b>: un avversario a caso si ritrova un&apos;apparizione a tutto schermo con urlo e vibrazione.</p>
         <h4>Fantasmi</h4>
-        <p>Chi viene catturato passa con i cercatori: <b>cattura esattamente come loro</b> con la password (mai il proprio ex compagno), i punti rubati sono suoi e conta nella classifica dei cercatori. In più ha il <b>Sussurro</b> per rivelare il settore di un fuggiasco.</p>
+        <p>Chi viene catturato passa con i cercatori: <b>cattura esattamente come loro</b> con la password (mai il proprio ex compagno), i punti rubati sono suoi e conta nella classifica dei cercatori. In più ha il <b>Sussurro</b> per rivelare il settore di un fuggiasco, e la <b>voce nel buio</b>: ogni 2 minuti può mandare una frase inquietante a un fuggiasco a caso, che non sa chi è stato.</p>
         <h4>Chi vince</h4>
         <p>Se sono tutti presi vince il cercatore (o il fantasma) con più punti. Altrimenti, allo scadere, vince la coppia ancora in gioco con più punti.</p>
         <h4>Ranghi</h4>
-        <p>Il rango resta al tuo telefono da una partita all&apos;altra: Novellino, Ombra (40 RP), Predatore (100), Spettro (200), Incubo (350), Leggenda (550). Si sale solo sul podio: 30 RP al primo posto, 20 al secondo, 10 al terzo. Se vincono i cercatori il podio è dei cercatori, se vincono i fuggiaschi delle coppie (a tutti e due). Contano solo le partite con almeno 4 giocatori in strada.</p>
+        <p>Il rango resta al tuo telefono da una partita all&apos;altra: Novellino, Ombra (40 RP), Predatore (100), Spettro (200), Incubo (350), Leggenda (550). Si sale solo sul podio: 30 RP al primo posto, 20 al secondo, 10 al terzo. Se vincono i cercatori il podio è dei cercatori, se vincono i fuggiaschi delle coppie (a tutti e due). Contano solo le partite con almeno 4 giocatori in strada. I migliori sono nella <a href="/classifica" target="_blank" rel="noreferrer">classifica di Bologna</a>.</p>
         <h4>Sicurezza</h4>
         <p>Si gioca di notte in strada: attenzione al traffico, niente corse in carreggiata, rispetto per chi abita lì. I luoghi abbandonati al buio possono essere pericolosi e spesso sono proprietà privata.</p>
       </div>

@@ -7,8 +7,8 @@ export type LegendTargets = Partial<Record<LegendId, LegendTarget>>;
 type LegendId =
   | "quest" | "flash" | "zombie" | "reward" | "abandoned" | "done"
   | "me" | "partner" | "partnerOld" | "acc"
-  | "zoneHot" | "zoneOld" | "ping" | "track"
-  | "boundary" | "sectors";
+  | "zoneHot" | "zoneOld" | "ping" | "track" | "still"
+  | "treasure" | "boundary" | "shrink" | "sectors";
 
 interface Item { id: LegendId; title: string; text: string; icon: React.ReactNode }
 
@@ -94,6 +94,20 @@ const Boundary = () => (
   <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M3 30L12 8l16 3 9 19z" fill="none" stroke="#a970ff" strokeWidth="3" strokeLinejoin="round" /></svg>
 );
 
+const Shrink = () => (
+  <svg viewBox="0 0 40 40" aria-hidden="true">
+    <path d="M3 30L12 8l16 3 9 19z" fill="none" stroke="#a970ff" strokeWidth="2" strokeDasharray="3 3" strokeLinejoin="round" opacity=".4" />
+    <path d="M11 26l5-11 9 2 5 9z" fill="none" stroke="#ff3a50" strokeWidth="3" strokeLinejoin="round" />
+  </svg>
+);
+
+const Still = () => (
+  <svg viewBox="0 0 40 40" aria-hidden="true">
+    <circle cx="20" cy="20" r="14" fill="none" stroke="#FF6600" strokeWidth="1.5" strokeDasharray="3 3" />
+    <circle cx="20" cy="20" r="7" fill="#FF6600" stroke="#0B0B0C" strokeWidth="2" />
+  </svg>
+);
+
 /* ---------- content ---------- */
 
 function sections(look: "fugitive" | "hunter" | "ghost") {
@@ -109,6 +123,7 @@ function sections(look: "fugitive" | "hunter" | "ghost") {
         { id: "zombie", title: "Sblocca Zombie", icon: <Gem c="#6dff7a" />, text: "Se la fate, sbloccate la carta Zombie: se vi prendono potete risorgere." },
         { id: "reward", title: "Sblocca una carta", icon: <Gem c="#b48cff" />, text: "Fatela per sbloccare Ghost Shield o Eco." },
         { id: "abandoned", title: "Posto abbandonato", icon: <Gem c="#c9b8ff" />, text: "Sfida dentro o fuori dall'edificio, decidete voi. Mai da soli." },
+        { id: "treasure", title: "Tesoro", icon: <Gem c="#ffc928" />, text: "Compare ogni tanto in un posto pubblico e sparisce dopo qualche minuto. Il primo fuggiasco che ci arriva (30 m) prende i punti. Lo vedono anche i cercatori!" },
         { id: "done", title: "Già fatta", icon: <Gem c="#5a5a62" beam={false} small />, text: "La vostra coppia l'ha già completata: niente più punti qui." },
       ],
     });
@@ -137,12 +152,15 @@ function sections(look: "fugitive" | "hunter" | "ghost") {
         { id: "zoneOld", title: "Zona che si raffredda", icon: <Disc c="#3a6bff" />, text: "Passa da rosso ad arancione e poi a blu in circa 3 minuti: più è blu, più il fuggiasco può essersi spostato." },
         { id: "ping", title: "Settore pingato", icon: <Square kind="ping" />, text: "Un ping ha trovato fuggiaschi in questo settore. Il numero dice quanti." },
         { id: "track", title: "Settore tracciato", icon: <Square kind="track" />, text: "Settore seguito con la carta Traccia: il conteggio si aggiorna finché dura." },
+        { id: "still", title: "Fuggiasco fermo", icon: <Still />, text: "Un fuggiasco che non si muove da 10 minuti compare qui, nel punto esatto, per 45 secondi. Corri!" },
+        { id: "treasure", title: "Tesoro", icon: <Gem c="#ffc928" />, text: "I fuggiaschi ci correranno per prendere i punti: aspettali lì." },
       ],
     });
   s.push({
     title: "Zona di gioco",
     items: [
       { id: "boundary", title: "Confine", icon: <Boundary />, text: "Linea viola: il limite del gioco. Se esci hai 60 secondi per rientrare." },
+      { id: "shrink", title: "Zona che si restringe", icon: <Shrink />, text: "Negli ultimi 15 minuti il confine si stringe verso il centro: vale la linea rossa. Fuori per più di 60 s e vieni segnalato." },
       { id: "sectors", title: "Settori C1–C9", icon: <Square kind="sectors" />, text: "La zona è divisa in 9 settori. Li usano i ping e le carte." },
     ],
   });

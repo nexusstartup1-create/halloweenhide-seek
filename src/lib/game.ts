@@ -5,11 +5,13 @@ import { del as delBlob, put as putBlob } from "@vercel/blob";
 import { q, tx } from "./db";
 import { CARDS, cardState, KEEP_ON_CAPTURE, ZOMBIE_SHIELD_S, type CardCode, type CardRow } from "./cards";
 import {
+  BLOOD_MOON_BEFORE_END_MIN, BLOOD_MOON_LEN_MIN, BLOOD_MOON_MULT, BLOOD_MOON_ZONE_FACTOR, GHOST_LINE_COOLDOWN_S, GHOST_LINES, REVEAL_S,
+  SHRINK_LAST_MIN, SHRINK_TO, STILL_MIN, STILL_RADIUS_M, TOP_BOUNTY, TREASURE_EVERY_MIN, TREASURE_LEN_MIN, TREASURE_POINTS, TREASURE_RADIUS_M,
   CAPTURE_BOUNTY, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_OPTIONS, HOST_STALE_MIN, LIVE_OPTIONS,
   allMissionsFor, missionsFor, SPECIAL_MISSIONS, type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
-import { bearing, compass, distanceM, inPolygon, neighbours, sectorOf, sectorPolygons } from "./geo";
+import { bearing, compass, distanceM, inPolygon, neighbours, scaleRing, sectorOf, sectorPolygons } from "./geo";
 
 export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "PAUSED" | "ENDED";
 export type Role = "HUNTER" | "FUGITIVE";
@@ -59,6 +61,10 @@ export interface PlayerRow {
   partner_pick: string | null;
   spectator: boolean;
   profile_id: string | null;
+  still_lat: number | null;
+  still_lng: number | null;
+  still_since: Date | null;
+  ghost_line_at: Date | null;
 }
 
 export class GameError extends Error {}
@@ -96,6 +102,59 @@ export function phaseOf(g: GameRow, now = Date.now()): Phase {
   if (g.ends_at && now >= +g.ends_at) return "ENDED";
   if (g.live_at && now < +g.live_at) return "HEAD_START";
   return "LIVE";
+}
+
+/* ---------------- live events on the game clock (frozen while paused) ---------------- */
+
+const clockOf = (g: GameRow, now = Date.now()) => (g.paused_at ? +g.paused_at : now);
+
+/** When the Blood Moon rises and sets, or null if the hunt is too short for one. */
+export function bloodMoon(g: GameRow) {
+  if (!g.live_at || !g.ends_at) return null;
+  const from = +g.ends_at - BLOOD_MOON_BEFORE_END_MIN * 60_000;
+  if (from <= +g.live_at) return null;
+  return { from, to: from + BLOOD_MOON_LEN_MIN * 60_000 };
+}
+
+export function moonOn(g: GameRow, now = Date.now()) {
+  const m = bloodMoon(g);
+  const t = clockOf(g, now);
+  return !!m && phaseOf(g, now) === "LIVE" && t >= m.from && t < m.to;
+}
+
+/** The last SHRINK_LAST_MIN minutes of the hunt, when the boundary closes in. */
+export function shrinkWindow(g: GameRow) {
+  if (!g.live_at || !g.ends_at) return null;
+  return { from: Math.max(+g.live_at, +g.ends_at - SHRINK_LAST_MIN * 60_000), to: +g.ends_at };
+}
+
+/** The boundary as it is right now: full size, then shrinking towards the centre in the last minutes. */
+export function boundaryNow(g: GameRow, now = Date.now()) {
+  const base = zoneOf(g.zone).boundary;
+  const w = shrinkWindow(g);
+  const phase = phaseOf(g, now);
+  if (!w || (phase !== "LIVE" && phase !== "PAUSED")) return base;
+  const k = Math.min(1, Math.max(0, (clockOf(g, now) - w.from) / (w.to - w.from)));
+  return k > 0 ? scaleRing(base, 1 - (1 - SHRINK_TO) * k) : base;
+}
+
+/** The treasure of the current window, if one is out. Deterministic from game, round and time slot. */
+export function treasureNow(g: GameRow, now = Date.now()) {
+  if (phaseOf(g, now) !== "LIVE" || !g.live_at) return null;
+  const every = TREASURE_EVERY_MIN * 60_000;
+  // The first one comes after a full interval, so the hunt has settled.
+  const elapsed = now - +g.live_at - every;
+  if (elapsed < 0) return null;
+  const slot = Math.floor(elapsed / every);
+  const from = +g.live_at + every + slot * every;
+  if (now - from >= TREASURE_LEN_MIN * 60_000) return null;
+  // Only public places that are still inside the (shrinking) zone when it appears.
+  const area = boundaryNow(g, from);
+  const spots = zoneOf(g.zone).missions.filter((m) => !m.abandoned && inPolygon(m.lng, m.lat, area));
+  if (!spots.length) return null;
+  const h = (g.id * 7919 + g.round * 104729 + slot * 15485863) >>> 0;
+  const spot = spots[h % spots.length];
+  return { slot, lat: spot.lat, lng: spot.lng, place: spot.place, points: TREASURE_POINTS[h % TREASURE_POINTS.length], until: new Date(from + TREASURE_LEN_MIN * 60_000) };
 }
 
 type Db = Pick<PoolClient, "query">;
@@ -275,6 +334,13 @@ export async function pairTable(c: Db | null, gid: number) {
   );
 }
 
+/** The pair with the most points while at least two pairs are still in, unless two share the top. */
+async function bountyPair(c: Db | null, gid: number) {
+  const alive = (await pairTable(c, gid)).filter((p) => p.active > 0).sort((a, b) => b.pool - a.pool);
+  if (alive.length < 2 || alive[0].pool === alive[1].pool) return null;
+  return alive[0];
+}
+
 async function resolveWinner(c: Db, gid: number): Promise<{ kind: "HUNTER" | "PAIR"; id: string } | null> {
   const pairs = (await pairTable(c, gid)).filter((p) => p.active > 0);
   if (pairs.length === 0) {
@@ -300,6 +366,9 @@ const ALERT_TITLE: Record<string, string> = {
   PINGED: "Radar ping!",
   REVEALED: "Un fantasma ti ha visto",
   JUMPSCARE: "👁️ C'è qualcuno dietro di te",
+  GHOST_LINE: "👻 Una voce nel buio",
+  STILL: "Ti hanno visto",
+  TREASURE: "💰 Tesoro!",
   INFO: "Night Hunt",
 };
 
@@ -535,6 +604,7 @@ export async function resumeGame(me: PlayerRow) {
     await c.query(`update cards set active_until = active_until + ${shift} where active_until > (select paused_at from game where id = $1) and owner_id in (select id from players where game_id = $1)`, [g.id]);
     await c.query(`update cards set cooldown_until = cooldown_until + ${shift} where cooldown_until > (select paused_at from game where id = $1) and owner_id in (select id from players where game_id = $1)`, [g.id]);
     await c.query(`update pings set expires_at = expires_at + ${shift} where game_id = $1 and expires_at > (select paused_at from game where id = $1)`, [g.id]);
+    await c.query(`update players set still_since = still_since + ${shift} where game_id = $1 and still_since is not null`, [g.id]);
     await c.query(`update game set live_at = live_at + ${shift}, ends_at = ends_at + ${shift}, paused_at = null where id = $1`, [g.id]);
     await sysMsg(c, g.id, "BROADCAST", "Si riparte!");
   });
@@ -622,6 +692,9 @@ async function clearRound(c: Db, gid: number, alsoChat: boolean) {
   await c.query("delete from pings where game_id = $1", [gid]);
   await c.query("delete from tracks where game_id = $1", [gid]);
   await c.query("delete from sos where game_id = $1", [gid]);
+  await c.query("delete from reveals where game_id = $1", [gid]);
+  await c.query("delete from treasures where game_id = $1", [gid]);
+  await c.query("delete from game_events where game_id = $1", [gid]);
   if (alsoChat) {
     await c.query("delete from messages where game_id = $1", [gid]);
     await c.query("delete from flash_slots where game_id = $1", [gid]);
@@ -635,7 +708,11 @@ export async function startGame(me: PlayerRow) {
     await requireHost(c, me);
     if (!g.drawn_at) throw new GameError("Prima estraete le coppie.");
     await clearRound(c, gid, false);
-    await c.query("update players set status = 'ACTIVE', captured_by = null, captured_at = null, out_since = null, out_reported = false, spectator = false where game_id = $1", [gid]);
+    await c.query(
+      `update players set status = 'ACTIVE', captured_by = null, captured_at = null, out_since = null, out_reported = false, spectator = false,
+              still_lat = null, still_lng = null, still_since = null, ghost_line_at = null where game_id = $1`,
+      [gid],
+    );
     await c.query("update pairs set pool = $1, last_gain_at = null where game_id = $2", [SEED_POOL, gid]);
     for (const p of (await c.query("select id from pairs where game_id = $1", [gid])).rows) {
       await c.query("insert into ledger (game_id, kind, pair_id, pair_delta) values ($1, 'SEED', $2, $3)", [gid, p.id, SEED_POOL]);
@@ -687,7 +764,7 @@ export async function askLobby(me: PlayerRow) {
 /* ---------------- capture ---------------- */
 
 export type CaptureResult =
-  | { result: "OK"; stolen: number; targetName: string; pairName: string; partnerActive: boolean; poolLeft: number }
+  | { result: "OK"; stolen: number; targetName: string; pairName: string; partnerActive: boolean; poolLeft: number; bounty: boolean }
   | { result: "WRONG"; attemptsLeft: number }
   | { result: "ALREADY"; targetName: string; capturedBy: string }
   | { result: "SHIELDED"; shieldLeftS: number }
@@ -757,13 +834,15 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
       return { result: "SHIELDED", shieldLeftS: Math.ceil((+shield.active_until! - Date.now()) / 1000) };
     }
 
+    const top = await bountyPair(c, gid);
     const [pair] = (await c.query("select * from pairs where id = $1 for update", [t.pair_id])).rows;
     const [{ n }] = (await c.query("select count(*)::int as n from players where pair_id = $1 and status = 'ACTIVE'", [t.pair_id])).rows;
     const stolen = Math.floor(pair.pool / n);
+    const bonus = CAPTURE_BOUNTY + (top?.id === pair.id ? TOP_BOUNTY : 0);
 
     await c.query(
       "insert into ledger (game_id, kind, pair_id, pair_delta, hunter_id, hunter_delta, ref_id, actor_id) values ($6, 'CAPTURE', $1, $2, $3, $4, $5, $3)",
-      [pair.id, -stolen, hunterId, stolen + CAPTURE_BOUNTY, t.id, gid],
+      [pair.id, -stolen, hunterId, stolen + bonus, t.id, gid],
     );
     await c.query("update players set status = 'CAPTURED', captured_by = $1, captured_at = now() where id = $2", [hunterId, t.id]);
     await c.query("update pairs set pool = pool - $1 where id = $2", [stolen, pair.id]);
@@ -776,13 +855,13 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
     const by = hunter.role === "HUNTER" ? hunterRow.name : `il fantasma ${hunterRow.name}`;
     const [partner] = (await c.query<PlayerRow>("select * from players where pair_id = $1 and id <> $2", [pair.id, t.id])).rows;
     const partnerActive = partner?.status === "ACTIVE";
-    await sysMsg(c, gid, "HUNTERS", `${hunter.role === "HUNTER" ? hunterRow.name : `👻 ${hunterRow.name}`} ha catturato ${t.name} (${pair.name}) · +${fmt(stolen + CAPTURE_BOUNTY)}. ${t.name} ora è un fantasma dalla vostra parte.`);
+    await sysMsg(c, gid, "HUNTERS", `${hunter.role === "HUNTER" ? hunterRow.name : `👻 ${hunterRow.name}`} ha catturato ${t.name} (${pair.name}) · +${fmt(stolen + bonus)}${bonus > CAPTURE_BOUNTY ? " con la taglia 🎯" : ""}. ${t.name} ora è un fantasma dalla vostra parte.`);
     await sysMsg(c, gid, "FUGITIVES", `${t.name} (${pair.name}) è stato catturato${hunter.role === "HUNTER" ? "" : " da un fantasma"}.`);
     await alert(c, t.id, "CAPTURED", `Catturato da ${by}. Ora sei un fantasma: catturi come i cercatori e hai il Sussurro.`);
     if (partner && partnerActive) {
       await alert(c, partner.id, "PARTNER_DOWN", `${t.name} è stato catturato. Il pool (${fmt(pair.pool - stolen)}) ora è tutto tuo.`);
     }
-    return { result: "OK", stolen: stolen + CAPTURE_BOUNTY, targetName: t.name, pairName: pair.name, partnerActive, poolLeft: pair.pool - stolen };
+    return { result: "OK", stolen: stolen + bonus, targetName: t.name, pairName: pair.name, partnerActive, poolLeft: pair.pool - stolen, bounty: bonus > CAPTURE_BOUNTY };
   });
 
   if (out.result === "OK") {
@@ -803,7 +882,7 @@ async function rise(c: Db, g: GameRow, player: PlayerRow, card: CardRow) {
   // Ghost-only cards (Sussurro) go; the points stolen as a ghost stay.
   await c.query("update cards set voided = true where owner_id = $1 and code = 'SUSSURRO'", [player.id]);
   await c.query(
-    "update players set status = 'ACTIVE', captured_by = null, captured_at = null, password = $1, out_since = null, out_reported = false where id = $2",
+    "update players set status = 'ACTIVE', captured_by = null, captured_at = null, password = $1, out_since = null, out_reported = false, still_lat = null, still_lng = null, still_since = now() where id = $2",
     [pw, player.id],
   );
   await c.query(
@@ -959,8 +1038,10 @@ export interface Zone { lat: number; lng: number; radiusM: number; ageS: number 
  */
 export async function hunterZones(g: GameRow): Promise<Zone[]> {
   const round = g.round;
-  const ZONE_RADIUS_M = g.zone_radius_m;
   const ZONE_MAX_OFFSET_M = Math.round(g.zone_radius_m * 0.69);
+  // Blood Moon: smaller circles. The offset shrinks with them, so the fugitive is still inside.
+  const k = moonOn(g) ? BLOOD_MOON_ZONE_FACTOR : 1;
+  const ZONE_RADIUS_M = Math.round(g.zone_radius_m * k);
   // New random offset (metres north/east) once per ZONE_REFRESH_S; the circle itself follows the live fix.
   await q(
     `update players p set
@@ -974,8 +1055,8 @@ export async function hunterZones(g: GameRow): Promise<Zone[]> {
   );
   const real = (await q<PlayerRow & { blur_dx: number | null; blur_dy: number | null }>(VISIBLE_FUGITIVES, [g.id])).filter((f) => f.blur_dx != null && f.lat != null);
   const zones: Zone[] = real.map((f) => ({
-    lat: f.lat! + f.blur_dy! / 111320,
-    lng: f.lng! + f.blur_dx! / (111320 * Math.cos((f.lat! * Math.PI) / 180)),
+    lat: f.lat! + (f.blur_dy! * k) / 111320,
+    lng: f.lng! + (f.blur_dx! * k) / (111320 * Math.cos((f.lat! * Math.PI) / 180)),
     radiusM: ZONE_RADIUS_M,
     ageS: f.fix_at ? Math.round((Date.now() - +f.fix_at) / 1000) : 0,
   }));
@@ -1078,7 +1159,8 @@ export async function completeMission(
 
   const g = await getGame(null, me.game_id);
   const flash = flashNow(g)?.mission.id === mission.id;
-  const points = flash ? mission.points * FLASH_MULT : mission.points;
+  const moon = moonOn(g);
+  const points = mission.points * (flash ? FLASH_MULT : 1) * (moon ? BLOOD_MOON_MULT : 1);
 
   return tx(async (c) => {
     const ins = await c.query(
@@ -1095,9 +1177,9 @@ export async function completeMission(
     const [pair] = (await c.query("select name from pairs where id = $1", [me.pair_id])).rows;
     const card = mission.reward ? await grantReward(c, me, mission.reward) : null;
     const cardNote = card ? ` · 🃏 ${card.name} a ${card.to}` : "";
-    await sysMsg(c, me.game_id, "FUGITIVES", `${pair.name} · "${mission.title}" · +${fmt(points)}${flash ? " (lampo!)" : ""}${cardNote}`, proofId);
+    await sysMsg(c, me.game_id, "FUGITIVES", `${pair.name} · "${mission.title}" · +${fmt(points)}${flash ? " (lampo!)" : ""}${moon ? " 🩸" : ""}${cardNote}`, proofId);
     return {
-      message: `+${fmt(points)} alla coppia${flash ? ", missione lampo!" : ""}${card ? ` Carta sbloccata: ${card.name}${card.to === me.name ? "" : ` (a ${card.to})`}.` : mission.reward ? " Avete già una carta Zombie a testa." : ""}`,
+      message: `+${fmt(points)} alla coppia${flash ? ", missione lampo!" : ""}${moon ? " Luna di Sangue: punti doppi!" : ""}${card ? ` Carta sbloccata: ${card.name}${card.to === me.name ? "" : ` (a ${card.to})`}.` : mission.reward ? " Avete già una carta Zombie a testa." : ""}`,
     };
   });
 }
@@ -1196,6 +1278,8 @@ export async function deleteMyData(me: PlayerRow) {
     await c.query("update messages set body = '', audio_path = null, deleted_at = coalesce(deleted_at, now()) where sender_id = $1", [me.id]);
     await c.query("delete from tracks where player_id = $1", [me.id]);
     await c.query("delete from sos where player_id = $1", [me.id]);
+    await c.query("delete from reveals where player_id = $1", [me.id]);
+    await c.query("update treasures set player_id = null where player_id = $1", [me.id]);
     await c.query("delete from alerts where player_id = $1", [me.id]);
     await c.query("delete from capture_attempts where hunter_id = $1", [me.id]);
     // The rank account too: profile, the phones linked to it, its podium history.
@@ -1239,7 +1323,7 @@ export async function purgeOldGames(limit = 5) {
       const inGame = "(select id from players where game_id = $1)";
       await c.query(`delete from alerts where player_id in ${inGame}`, [id]);
       await c.query(`delete from capture_attempts where hunter_id in ${inGame}`, [id]);
-      for (const t of ["tracks", "sos", "pings", "ledger", "proofs", "messages", "flash_slots", "chat_groups"]) await c.query(`delete from ${t} where game_id = $1`, [id]);
+      for (const t of ["tracks", "sos", "pings", "ledger", "proofs", "messages", "flash_slots", "chat_groups", "reveals", "treasures", "game_events"]) await c.query(`delete from ${t} where game_id = $1`, [id]);
       await c.query("delete from game where id = $1", [id]); // players and pairs: cascade
     });
   }
@@ -1293,7 +1377,8 @@ const ROUGH_FIX_M = 150;
 
 export async function reportLocation(player: PlayerRow, lat: number, lng: number, acc: number) {
   const g = await getGame(null, player.game_id);
-  const BOUNDARY = zoneOf(g.zone).boundary;
+  // In the last minutes the line closes in: "out" means out of the boundary as it is now.
+  const BOUNDARY = boundaryNow(g);
   const phase = phaseOf(g);
   // A rough network fix never replaces a sharp GPS fix from the last minute (Android sends both).
   await q(
@@ -1306,6 +1391,13 @@ export async function reportLocation(player: PlayerRow, lat: number, lng: number
   if (acc > ROUGH_FIX_M) return;
   if (player.role && !player.spectator && (phase === "LIVE" || phase === "HEAD_START")) await recordTrack(player, lat, lng);
   if (!player.role || player.status !== "ACTIVE" || player.spectator || (phase !== "LIVE" && phase !== "HEAD_START")) return;
+
+  if (player.role === "FUGITIVE" && acc <= STILL_RADIUS_M) {
+    // Moving away from where they were standing restarts the "still" clock.
+    const moved = player.still_lat == null || distanceM(player.still_lat, player.still_lng!, lat, lng) > STILL_RADIUS_M;
+    if (moved) await q("update players set still_lat = $1, still_lng = $2, still_since = now() where id = $3", [lat, lng, player.id]);
+    if (phase === "LIVE") await takeTreasure(g, player, lat, lng, acc);
+  }
 
   if (inPolygon(lng, lat, BOUNDARY)) {
     if (player.out_since) await q("update players set out_since = null, out_reported = false where id = $1", [player.id]);
@@ -1323,6 +1415,109 @@ export async function reportLocation(player: PlayerRow, lat: number, lng: number
       else await sysMsg(c, g.id, "BROADCAST", `Fuori confine da oltre 60 s: ${player.name} (cercatore).`);
     });
   }
+}
+
+/** First free fugitive close enough to the treasure of the moment takes it for the pair. */
+async function takeTreasure(g: GameRow, player: PlayerRow, lat: number, lng: number, acc: number) {
+  const t = treasureNow(g);
+  if (!t || !player.pair_id || distanceM(lat, lng, t.lat, t.lng) > TREASURE_RADIUS_M + Math.min(acc, 20)) return;
+  const moon = moonOn(g);
+  const points = t.points * (moon ? BLOOD_MOON_MULT : 1);
+  await tx(async (c) => {
+    const ins = await c.query(
+      "insert into treasures (game_id, round, slot, pair_id, player_id, points) values ($1, $2, $3, $4, $5, $6) on conflict do nothing",
+      [g.id, g.round, t.slot, player.pair_id, player.id, points],
+    );
+    if (!ins.rowCount) return;
+    await c.query("insert into ledger (game_id, kind, pair_id, pair_delta, ref_id, actor_id) values ($1, 'TREASURE', $2, $3, $4, $5)", [
+      g.id, player.pair_id, points, `T${t.slot}`, player.id,
+    ]);
+    await c.query("update pairs set pool = pool + $1, last_gain_at = now() where id = $2", [points, player.pair_id]);
+    const [pair] = (await c.query<{ name: string }>("select name from pairs where id = $1", [player.pair_id])).rows;
+    await sysMsg(c, g.id, "BROADCAST", `💰 ${player.name} (${pair.name}) ha preso il tesoro di ${t.place} · +${fmt(points)}${moon ? " 🩸" : ""}`);
+    await alert(c, player.id, "TREASURE", `Tesoro preso! +${fmt(points)} alla coppia${moon ? " (Luna di Sangue: doppio)" : ""}.`);
+  });
+}
+
+/**
+ * Announces each live event once (the first poll that sees it) and reveals fugitives who stood still
+ * too long. Runs on every poll during the hunt; the inserts make it safe with many phones polling.
+ */
+async function liveEvents(g: GameRow) {
+  const now = Date.now();
+  const once = async (kind: string) =>
+    (await q("insert into game_events (game_id, round, kind) values ($1, $2, $3) on conflict do nothing returning kind", [g.id, g.round, kind])).length > 0;
+  const everyone = async () => (await q<{ id: string }>("select id from players where game_id = $1", [g.id])).map((r) => r.id);
+
+  const moon = bloodMoon(g);
+  if (moon && moonOn(g, now) && (await once("MOON"))) {
+    const text = `🩸 Luna di Sangue! Per ${BLOOD_MOON_LEN_MIN} minuti i cercatori vedono cerchi più piccoli e missioni e tesori valgono doppio.`;
+    await q("insert into messages (game_id, channel, kind, body) values ($1, 'BROADCAST', 'SYSTEM', $2)", [g.id, text]);
+    notify(await everyone(), "🩸 Luna di Sangue", text, "moon");
+  }
+  const shrink = shrinkWindow(g);
+  if (shrink && now >= shrink.from && (await once("SHRINK"))) {
+    const text = `⚠️ La zona si restringe! Negli ultimi ${SHRINK_LAST_MIN} minuti il confine si stringe verso il centro: chi resta fuori più di 60 s viene segnalato.`;
+    await q("insert into messages (game_id, channel, kind, body) values ($1, 'BROADCAST', 'SYSTEM', $2)", [g.id, text]);
+    notify(await everyone(), "⚠️ La zona si restringe", text, "shrink");
+  }
+  const t = treasureNow(g, now);
+  if (t && (await once(`T${t.slot}`))) {
+    const text = `💰 Tesoro apparso a ${t.place}: +${fmt(t.points)} al primo fuggiasco che ci arriva. Sparisce tra ${TREASURE_LEN_MIN} minuti.`;
+    await q("insert into messages (game_id, channel, kind, body) values ($1, 'BROADCAST', 'SYSTEM', $2)", [g.id, text]);
+    notify(await everyone(), "💰 Tesoro", text, "treasure");
+  }
+
+  // Standing still: counted from the start of the hunt, never during Nebbia.
+  const still = await q<{ id: string; name: string; lat: number; lng: number }>(
+    `update players p set still_since = now()
+      where p.game_id = $1 and p.role = 'FUGITIVE' and p.status = 'ACTIVE' and not p.spectator and p.lat is not null
+        and greatest(p.still_since, $2::timestamptz) < now() - make_interval(mins => $3::int)
+        and not exists (select 1 from cards k join players m on m.id = k.owner_id
+                         where m.pair_id = p.pair_id and k.code = 'NEBBIA' and not k.voided and k.active_until > now())
+      returning p.id, p.name, coalesce(p.still_lat, p.lat) as lat, coalesce(p.still_lng, p.lng) as lng`,
+    [g.id, g.live_at, STILL_MIN],
+  );
+  if (!still.length) return;
+  const BOUNDARY = zoneOf(g.zone).boundary;
+  await tx(async (c) => {
+    for (const f of still) {
+      await c.query("insert into reveals (game_id, player_id, lat, lng, until) values ($1, $2, $3, $4, now() + make_interval(secs => $5::int))", [g.id, f.id, f.lat, f.lng, REVEAL_S]);
+      await alert(c, f.id, "STILL", `Sei fermo da ${STILL_MIN} minuti: per ${REVEAL_S} secondi i cercatori vedono dove sei. Muoviti!`);
+      await sysMsg(c, g.id, "HUNTERS", `👁️ Un fuggiasco è fermo da ${STILL_MIN} minuti nel settore ${sectorOf(f.lng, f.lat, BOUNDARY)}: è sulla mappa per ${REVEAL_S} secondi!`);
+    }
+  });
+  const hunters = (await q<{ id: string }>("select id from players where game_id = $1 and (role = 'HUNTER' or status = 'CAPTURED')", [g.id])).map((r) => r.id);
+  notify(hunters, "👁️ Fuggiasco fermo", `Un fuggiasco fermo da ${STILL_MIN} minuti è sulla mappa. Corri!`, "still");
+}
+
+/* ---------------- ghost whispers in the dark ---------------- */
+
+/** A ghost sends one of the preset lines to a random free fugitive (never the ex partner). */
+export async function ghostLine(me: PlayerRow, index: number) {
+  const g = await getGame(null, me.game_id);
+  if (phaseOf(g) !== "LIVE") throw new GameError("Si sussurra solo a caccia aperta.");
+  if (!isGhost(me)) throw new GameError("Solo i fantasmi possono sussurrare nel buio.");
+  const line = GHOST_LINES[index];
+  if (!line) throw new GameError("Frase non valida.");
+  return tx(async (c) => {
+    const ok = await c.query(
+      "update players set ghost_line_at = now() where id = $1 and (ghost_line_at is null or ghost_line_at < now() - make_interval(secs => $2::int))",
+      [me.id, GHOST_LINE_COOLDOWN_S],
+    );
+    if (!ok.rowCount) throw new GameError("Il buio ha bisogno di tempo: riprova tra poco.");
+    const victims = (
+      await c.query<{ id: string; name: string }>(
+        "select id, name from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE' and not spectator and pair_id is distinct from $2",
+        [me.game_id, me.pair_id],
+      )
+    ).rows;
+    if (!victims.length) throw new GameError("Non c'è nessuno da spaventare adesso.");
+    const v = victims[randomInt(victims.length)];
+    await alert(c, v.id, "GHOST_LINE", line);
+    await sysMsg(c, me.game_id, "HUNTERS", `👻 ${me.name} ha sussurrato a ${v.name}: “${line}”`);
+    return { message: `Hai sussurrato a ${v.name}: “${line}”` };
+  });
 }
 
 /* ---------------- chat ---------------- */
@@ -1614,7 +1809,10 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
   const now = Date.now();
   const phase = phaseOf(g, now);
   const live = phase === "LIVE";
-  if (live) await announceFlash(g);
+  if (live) {
+    await announceFlash(g);
+    await liveEvents(g);
+  }
   const flash = flashNow(g, now);
   const isHost = g.host_id === me.id;
 
@@ -1626,6 +1824,10 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
         [groups.map((x) => x.id)],
       )
     : [];
+  const treasure = treasureNow(g, now);
+  const treasureTaken = treasure
+    ? (await q<{ name: string }>("select pr.name from treasures t join pairs pr on pr.id = t.pair_id where t.game_id = $1 and t.round = $2 and t.slot = $3", [g.id, g.round, treasure.slot]))[0]?.name ?? null
+    : null;
   const [messages, alerts, cardRows, hunters, pairs, roster] = await Promise.all([
     q(
       `select m.id::int as id, m.channel, m.kind, m.body, m.at, m.proof_id::int as proof_id, pr.kind as proof_kind,
@@ -1690,6 +1892,20 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       hostStale: hostIsStale((await q<PlayerRow>("select * from players where id = $1", [g.host_id]))[0]),
       captureBounty: CAPTURE_BOUNTY,
       zoneRadiusM: g.zone_radius_m,
+      // Live events: times in ms on the server clock (the app corrects with serverNow).
+      moon: (() => {
+        const m = bloodMoon(g);
+        return m ? { ...m, on: moonOn(g, now), mult: BLOOD_MOON_MULT } : null;
+      })(),
+      shrink: shrinkWindow(g),
+      boundaryNow: boundaryNow(g, now),
+      bounty: (() => {
+        if (!live) return null;
+        const alive = pairs.filter((p) => p.active > 0).sort((a, b) => b.pool - a.pool);
+        if (alive.length < 2 || alive[0].pool === alive[1].pool) return null;
+        return { pairId: alive[0].id, name: alive[0].name, points: TOP_BOUNTY };
+      })(),
+      treasure: treasure && !treasureTaken ? { lat: treasure.lat, lng: treasure.lng, place: treasure.place, points: treasure.points, until: treasure.until } : null,
     },
     // Host panel: everyone's rejoin code and status.
     hostView: isHost
@@ -1784,6 +2000,10 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
         attemptsLeft: lock.attemptsLeft,
         lockedS: lock.lockedS,
         zones: live ? await hunterZones(g) : [],
+        // Fugitives who stood still too long, for a few seconds at their exact spot.
+        reveals: live
+          ? await q<{ lat: number; lng: number; until: Date }>("select lat, lng, until from reveals where game_id = $1 and until > now() order by id", [g.id])
+          : [],
       },
     };
   }
@@ -1820,7 +2040,14 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     const alive = pairs.filter((p) => p.active > 0).sort((a, b) => b.pool - a.pool || b.active - a.active);
     return {
       ...base,
-      ghostCapture: isGhost(me) ? { ...(await lockState(me.id)), stolen: hunters.find((h) => h.id === me.id)?.stolen ?? 0 } : null,
+      ghostCapture: isGhost(me)
+        ? {
+            ...(await lockState(me.id)),
+            stolen: hunters.find((h) => h.id === me.id)?.stolen ?? 0,
+            lines: GHOST_LINES,
+            lineAt: me.ghost_line_at ? new Date(+me.ghost_line_at + GHOST_LINE_COOLDOWN_S * 1000) : null,
+          }
+        : null,
       fugitive: {
         password: me.password,
         pair: { id: pair.id, name: pair.name, pool: pair.pool, active: pair.active },
