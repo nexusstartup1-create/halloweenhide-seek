@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
-import { randomInt, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { PODIUM_RP, RANKED_MIN_PLAYERS, rankOf } from "./ranks";
 import { del as delBlob, put as putBlob } from "@vercel/blob";
 import { q, tx } from "./db";
 import { CARDS, cardState, KEEP_ON_CAPTURE, ZOMBIE_SHIELD_S, type CardCode, type CardRow } from "./cards";
@@ -57,6 +58,7 @@ export interface PlayerRow {
   away: boolean;
   partner_pick: string | null;
   spectator: boolean;
+  profile_id: string | null;
 }
 
 export class GameError extends Error {}
@@ -125,8 +127,127 @@ async function endGame(gid: number, at: Date) {
       "update game set ended_at = $1, winner_kind = $2, winner_id = $3 where id = $4 and ended_at is null",
       [at, w?.kind ?? null, w?.id ?? null, gid],
     );
-    if (res.rowCount) await sysMsg(c, gid, "BROADCAST", "Fine partita. Classifica e album delle prove sono aperti a tutti.");
+    if (res.rowCount) {
+      await sysMsg(c, gid, "BROADCAST", "Fine partita. Classifica e album delle prove sono aperti a tutti.");
+      await awardRanks(c, gid, w?.kind ?? null);
+    }
   });
+}
+
+/* ---------------- ranks ---------------- */
+
+/** Links a player to the profile of the phone they play from (created on first use). */
+export async function linkProfile(playerId: string, key: unknown, name: string) {
+  const id = await profileForKey(key, name);
+  if (id) await q("update players set profile_id = $1 where id = $2", [id, playerId]);
+}
+
+const keyHash = (key: string) => createHash("sha256").update(key).digest("hex");
+const validKey = (key: unknown): key is string => typeof key === "string" && key.length >= 16 && key.length <= 100;
+
+/** The profile a phone's secret key belongs to (created on first use). */
+async function profileForKey(key: unknown, name: string) {
+  if (!validKey(key)) return null;
+  const h = keyHash(key);
+  const [k] = await q<{ profile_id: string }>("select profile_id from profile_keys where key_hash = $1", [h]);
+  const id = k?.profile_id ?? h;
+  await q(
+    `insert into profiles (id, name) values ($1, $2)
+     on conflict (id) do update set name = case when profiles.username is null then excluded.name else profiles.name end, updated_at = now()`,
+    [id, name],
+  );
+  if (!k) await q("insert into profile_keys (key_hash, profile_id) values ($1, $2) on conflict do nothing", [h, id]);
+  return id;
+}
+
+function hashPassword(pw: string) {
+  const salt = randomBytes(16);
+  return `scrypt$${salt.toString("hex")}$${scryptSync(pw, salt, 32).toString("hex")}`;
+}
+function checkPassword(pw: string, stored: string) {
+  const [, salt, hash] = stored.split("$");
+  const a = scryptSync(pw, Buffer.from(salt, "hex"), 32), b = Buffer.from(hash, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+const cleanUser = (u: unknown) => {
+  const s = String(u ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9._-]{3,20}$/.test(s)) throw new GameError("Nome account: da 3 a 20 caratteri, solo lettere, numeri, punto, trattino.");
+  return s;
+};
+const checkPw = (p: unknown) => {
+  const s = String(p ?? "");
+  if (s.length < 6 || s.length > 72) throw new GameError("La password deve avere almeno 6 caratteri.");
+  return s;
+};
+
+/** Protects my rank with a name and password, so it can be recovered on another phone. */
+export async function saveAccount(me: PlayerRow, username: unknown, password: unknown, current?: unknown) {
+  if (!me.profile_id) throw new GameError("Gioca almeno una partita da questo telefono per avere un rango da salvare.");
+  const u = cleanUser(username), pw = checkPw(password);
+  const [p] = await q<{ username: string | null; password_hash: string | null }>("select username, password_hash from profiles where id = $1", [me.profile_id]);
+  if (p?.password_hash && !(typeof current === "string" && checkPassword(current, p.password_hash))) throw new GameError("Password attuale sbagliata.");
+  const [taken] = await q("select 1 from profiles where username = $1 and id <> $2", [u, me.profile_id]);
+  if (taken) throw new GameError("Questo nome account è già preso. Scegline un altro.");
+  await q("update profiles set username = $1, password_hash = $2, updated_at = now() where id = $3", [u, hashPassword(pw), me.profile_id]);
+}
+
+/**
+ * Recovers a rank on this phone: checks name and password, then this phone's key points to that profile
+ * (and the player in the current game, if any). Five wrong passwords lock the account for 10 minutes.
+ */
+export async function recoverAccount(key: unknown, username: unknown, password: unknown, playerId?: string | null) {
+  if (!validKey(key)) throw new GameError("Telefono non riconosciuto. Ricarica la pagina e riprova.");
+  const u = cleanUser(username), pw = String(password ?? "");
+  const [p] = await q<{ id: string; password_hash: string | null; locked_until: Date | null; name: string; rp: number }>(
+    "select id, password_hash, locked_until, name, rp from profiles where username = $1", [u],
+  );
+  if (!p || !p.password_hash) throw new GameError("Nome account o password sbagliati.");
+  if (p.locked_until && +p.locked_until > Date.now()) throw new GameError("Troppi tentativi sbagliati. Riprova tra qualche minuto.");
+  if (!checkPassword(pw, p.password_hash)) {
+    await q("update profiles set failed = failed + 1, locked_until = case when failed + 1 >= 5 then now() + interval '10 minutes' else null end where id = $1", [p.id]);
+    throw new GameError("Nome account o password sbagliati.");
+  }
+  await q("update profiles set failed = 0, locked_until = null where id = $1", [p.id]);
+  await q(
+    "insert into profile_keys (key_hash, profile_id) values ($1, $2) on conflict (key_hash) do update set profile_id = excluded.profile_id, at = now()",
+    [keyHash(key), p.id],
+  );
+  if (playerId) await q("update players set profile_id = $1 where id = $2", [p.id, playerId]);
+  return { name: p.name, rank: rankOf(p.rp).name, rp: p.rp };
+}
+
+/**
+ * At the end of a game: the podium earns rank points. Only real games count — at least RANKED_MIN_PLAYERS
+ * players sent GPS positions — and only players who really played. Hunters win: the top 3 hunters by
+ * points stolen. Fugitives win: the top 3 pairs, both members.
+ */
+async function awardRanks(c: Db, gid: number, winner: "HUNTER" | "PAIR" | null) {
+  const real = new Set(((await c.query<{ player_id: string }>("select distinct player_id from tracks where game_id = $1", [gid])).rows).map((r) => r.player_id));
+  if (real.size < RANKED_MIN_PLAYERS || !winner) return;
+  const profiled = new Map(
+    (await c.query<{ id: string; profile_id: string }>("select id, profile_id from players where game_id = $1 and profile_id is not null and not spectator", [gid])).rows
+      .filter((p) => real.has(p.id))
+      .map((p) => [p.id, p.profile_id]),
+  );
+  for (const pid of new Set(profiled.values())) await c.query("update profiles set games = games + 1, updated_at = now() where id = $1", [pid]);
+  const places: string[][] = [];
+  if (winner === "HUNTER") {
+    for (const h of (await hunterTotals(c, gid)).filter((h) => h.stolen > 0).slice(0, 3)) places.push([h.id]);
+  } else {
+    const ps = (await pairTable(c, gid)).sort((a, b) => b.pool - a.pool || b.active - a.active).slice(0, 3);
+    for (const p of ps) places.push((await c.query<{ id: string }>("select id from players where pair_id = $1", [p.id])).rows.map((r) => r.id));
+  }
+  for (const [i, ids] of places.entries()) {
+    for (const playerId of ids) {
+      const prof = profiled.get(playerId);
+      if (!prof) continue;
+      const { rows } = await c.query<{ rp: number }>(
+        "update profiles set rp = rp + $2, podiums = podiums + 1, wins = wins + $3, updated_at = now() where id = $1 returning rp",
+        [prof, PODIUM_RP[i], i === 0 ? 1 : 0],
+      );
+      await c.query("insert into rank_awards (game_id, profile_id, place, rp, rp_after) values ($1, $2, $3, $4, $5) on conflict do nothing", [gid, prof, i + 1, PODIUM_RP[i], rows[0].rp]);
+    }
+  }
 }
 
 export async function hunterTotals(c: Db | null, gid: number) {
@@ -254,6 +375,8 @@ async function invalidateDraw(c: Db, gid: number) {
 
 /** A new game in one of the zones. Returns its 5-letter code; the creator joins it as host right after. */
 export async function createGame(zone: string, missionsMode = "chill") {
+  // Housekeeping: old games and their data go after KEEP_DAYS (see the privacy page).
+  await purgeOldGames().catch((e) => console.warn("purge:", e));
   if (!(zone in ZONES)) throw new GameError("Scegli una zona di gioco.");
   const mode = missionsMode === "abbandonati" ? "abbandonati" : "chill";
   for (let i = 0; i < 20; i++) {
@@ -330,7 +453,8 @@ export async function drawRoles(me: PlayerRow) {
     await c.query("update players set role = 'HUNTER' where id = any($1)", [hunters.map((h) => h.id)]);
     await c.query("delete from pairs where game_id = $1", [gid]);
     await c.query("update game set roles_at = now(), drawn_at = null where id = $1", [gid]);
-    await sysMsg(c, gid, "BROADCAST", `Ruoli estratti. ${n === 1 ? "Cercatore" : "Cercatori"}: ${hunters.map((h) => h.name).join(", ")}. Tutti gli altri scappano: sceglietevi il compagno.`);
+    // Who's hunting stays a secret here: everyone turns over their own card in the lobby.
+    await sysMsg(c, gid, "BROADCAST", `Ruoli estratti: ${n === 1 ? "1 cercatore" : `${n} cercatori`}, tutti gli altri scappano. Girate la vostra carta in lobby, poi i fuggiaschi si scelgono il compagno.`);
   });
 }
 
@@ -548,7 +672,16 @@ export async function newRound(me: PlayerRow) {
               ended_at = null, winner_kind = null, winner_id = null, paused_at = null where id = $1`,
       [gid],
     );
+    await sysMsg(c, gid, "BROADCAST", "Si torna in lobby: nuova partita con gli stessi giocatori. Girate la carta quando vengono estratti i ruoli!");
   });
+}
+
+/** After a game, a player who isn't the host asks to go back to the lobby. */
+export async function askLobby(me: PlayerRow) {
+  const g = await getGame(null, me.game_id);
+  if (phaseOf(g) !== "ENDED") throw new GameError("La partita non è ancora finita.");
+  await tx((c) => sysMsg(c, g.id, "BROADCAST", `${me.name} vuole tornare in lobby per un'altra partita.`));
+  if (g.host_id && g.host_id !== me.id) notify([g.host_id], "Un'altra partita?", `${me.name} vuole tornare in lobby. Apri Night Hunt per ricominciare.`, "lobby");
 }
 
 /* ---------------- capture ---------------- */
@@ -828,20 +961,21 @@ export async function hunterZones(g: GameRow): Promise<Zone[]> {
   const round = g.round;
   const ZONE_RADIUS_M = g.zone_radius_m;
   const ZONE_MAX_OFFSET_M = Math.round(g.zone_radius_m * 0.69);
+  // New random offset (metres north/east) once per ZONE_REFRESH_S; the circle itself follows the live fix.
   await q(
     `update players p set
-        blur_lat = p.lat + (r.d * cos(r.a)) / 111320.0,
-        blur_lng = p.lng + (r.d * sin(r.a)) / (111320.0 * cos(radians(p.lat))),
+        blur_dy = r.d * cos(r.a),
+        blur_dx = r.d * sin(r.a),
         blur_at = now()
        from (select id, random() * 2 * pi() as a, sqrt(random()) * $1::float as d from players) r
       where r.id = p.id and p.game_id = $3 and p.role = 'FUGITIVE' and p.status = 'ACTIVE' and p.lat is not null
-        and (p.blur_at is null or p.blur_at < now() - make_interval(secs => $2::int))`,
+        and (p.blur_at is null or p.blur_dx is null or p.blur_at < now() - make_interval(secs => $2::int))`,
     [ZONE_MAX_OFFSET_M, ZONE_REFRESH_S, g.id],
   );
-  const real = (await q<PlayerRow & { blur_lat: number; blur_lng: number }>(VISIBLE_FUGITIVES, [g.id])).filter((f) => f.blur_lat != null);
+  const real = (await q<PlayerRow & { blur_dx: number | null; blur_dy: number | null }>(VISIBLE_FUGITIVES, [g.id])).filter((f) => f.blur_dx != null && f.lat != null);
   const zones: Zone[] = real.map((f) => ({
-    lat: f.blur_lat,
-    lng: f.blur_lng,
+    lat: f.lat! + f.blur_dy! / 111320,
+    lng: f.lng! + f.blur_dx! / (111320 * Math.cos((f.lat! * Math.PI) / 180)),
     radiusM: ZONE_RADIUS_M,
     ageS: f.fix_at ? Math.round((Date.now() - +f.fix_at) / 1000) : 0,
   }));
@@ -1035,6 +1169,81 @@ export async function replayOf(me: PlayerRow) {
     tracks,
     captures: caps.map((c) => ({ victim: c.victim, hunter: c.hunter, t: Number(c.t) })),
   };
+}
+
+/* ---------------- privacy ---------------- */
+
+/** Days a finished game's data is kept (routes, photos, videos, messages, positions). */
+export const KEEP_DAYS = 30;
+
+/**
+ * "Cancella i miei dati": removes the player and everything they left on the server — position and
+ * routes, profile photo, voice messages (files and text are blanked), the mission photos/videos they
+ * uploaded, SOS calls, push subscriptions and sessions. Points already won stay with the pair.
+ */
+export async function deleteMyData(me: PlayerRow) {
+  const files = [
+    ...(await q<{ p: string }>("select audio_path as p from messages where sender_id = $1 and audio_path is not null", [me.id])),
+    ...(await q<{ p: string }>("select pathname as p from proofs where player_id = $1", [me.id])),
+  ];
+  for (const f of files) await delBlob(f.p).catch(() => {});
+  const gid = me.game_id;
+  let checkEnd = false;
+  await tx(async (c) => {
+    const g = await getGame(c, gid);
+    const phase = phaseOf(g);
+    await c.query("delete from proofs where player_id = $1", [me.id]);
+    await c.query("update messages set body = '', audio_path = null, deleted_at = coalesce(deleted_at, now()) where sender_id = $1", [me.id]);
+    await c.query("delete from tracks where player_id = $1", [me.id]);
+    await c.query("delete from sos where player_id = $1", [me.id]);
+    await c.query("delete from alerts where player_id = $1", [me.id]);
+    await c.query("delete from capture_attempts where hunter_id = $1", [me.id]);
+    // The rank account too: profile, the phones linked to it, its podium history.
+    if (me.profile_id) {
+      await c.query("update players set profile_id = null where profile_id = $1", [me.profile_id]);
+      await c.query("delete from rank_awards where profile_id = $1", [me.profile_id]);
+      await c.query("delete from profile_keys where profile_id = $1", [me.profile_id]);
+      await c.query("delete from profiles where id = $1", [me.profile_id]);
+    }
+    if (phase === "LOBBY") await invalidateDraw(c, gid);
+    await c.query("delete from players where id = $1", [me.id]); // sessions, push, cards, groups: cascade
+    await sysMsg(c, gid, "BROADCAST", `${me.name} ha lasciato la partita e cancellato i suoi dati.`);
+    await ensureHost(c, gid);
+    checkEnd = phase === "LIVE" && me.role === "FUGITIVE";
+  });
+  if (checkEnd) {
+    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1 and role = 'FUGITIVE' and status = 'ACTIVE' and not spectator", [gid]);
+    if (n === 0) await endGame(gid, new Date());
+  }
+}
+
+/**
+ * Deletes games finished more than KEEP_DAYS ago (or abandoned for twice as long) with all their data
+ * and files. Runs a few at a time whenever a new game is created.
+ */
+export async function purgeOldGames(limit = 5) {
+  const old = await q<{ id: number }>(
+    `select id from game
+      where (ended_at is not null and ended_at < now() - make_interval(days => $1))
+         or (ended_at is null and created_at < now() - make_interval(days => $1 * 2))
+      order by id limit $2`,
+    [KEEP_DAYS, limit],
+  );
+  for (const { id } of old) {
+    const files = [
+      ...(await q<{ p: string }>("select audio_path as p from messages where game_id = $1 and audio_path is not null", [id])),
+      ...(await q<{ p: string }>("select pathname as p from proofs where game_id = $1", [id])),
+    ];
+    for (const f of files) await delBlob(f.p).catch(() => {});
+    await tx(async (c) => {
+      const inGame = "(select id from players where game_id = $1)";
+      await c.query(`delete from alerts where player_id in ${inGame}`, [id]);
+      await c.query(`delete from capture_attempts where hunter_id in ${inGame}`, [id]);
+      for (const t of ["tracks", "sos", "pings", "ledger", "proofs", "messages", "flash_slots", "chat_groups"]) await c.query(`delete from ${t} where game_id = $1`, [id]);
+      await c.query("delete from game where id = $1", [id]); // players and pairs: cascade
+    });
+  }
+  return old.length;
 }
 
 /* ---------------- SOS ---------------- */
@@ -1430,8 +1639,8 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     q<CardRow>("select * from cards where owner_id = $1 order by id", [me.id]),
     hunterTotals(null, g.id),
     pairTable(null, g.id),
-    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null; partner_pick: string | null }>(
-      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen, partner_pick from players where game_id = $1 order by joined_at",
+    q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null; partner_pick: string | null; profile_id: string | null }>(
+      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen, partner_pick, profile_id from players where game_id = $1 order by joined_at",
       [g.id],
     ),
   ]);
@@ -1487,6 +1696,14 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       ? roster.map((p) => ({ id: p.id, name: p.name, role: p.role, status: p.status, spectator: p.spectator, rejoinCode: p.rejoin_code, lastSeen: p.last_seen }))
       : null,
     me: { id: me.id, name: me.name, role: me.role, status: me.status, pairId: me.pair_id, rejoinCode: me.rejoin_code, spectator: me.spectator },
+    // Rank of my phone's profile, and what this game gave me.
+    rank: await (async () => {
+      if (!me.profile_id) return null;
+      const [p] = await q<{ rp: number; games: number; podiums: number; wins: number; username: string | null }>("select rp, games, podiums, wins, username from profiles where id = $1", [me.profile_id]);
+      if (!p) return null;
+      const [award] = await q<{ place: number; rp: number; rp_after: number }>("select place, rp, rp_after from rank_awards where game_id = $1 and profile_id = $2", [g.id, me.profile_id]);
+      return { ...rankOf(p.rp), games: p.games, podiums: p.podiums, wins: p.wins, account: p.username, award: award ? { place: award.place, rp: award.rp, before: rankOf(award.rp_after - award.rp).name } : null };
+    })(),
     // Open SOS calls, with the live position of whoever sent them.
     sos: (
       await q<{ id: string; player_id: string; name: string; lat: number | null; lng: number | null; acc_m: number | null; fix_at: Date | null; at: Date; responders: string[] }>(
@@ -1501,7 +1718,11 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
       .filter((p) => p.id !== me.id && p.typing_at && now - +p.typing_at < 5000 && channels.includes(p.typing_channel ?? ""))
       .map((p) => ({ id: p.id, name: p.name, channel: p.typing_channel, audio: p.typing_kind === "audio" })),
     lobby: {
-      players: roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, spectator: p.spectator, partnerPick: p.partner_pick })),
+      players: await (async () => {
+        const ids = roster.map((p) => p.profile_id).filter(Boolean);
+        const rp = new Map((await q<{ id: string; rp: number }>("select id, rp from profiles where id = any($1)", [ids])).map((r) => [r.id, r.rp]));
+        return roster.map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, spectator: p.spectator, partnerPick: p.partner_pick, rank: rankOf(rp.get(p.profile_id ?? "") ?? 0).index }));
+      })(),
       pairs: pairs.map((p) => ({ id: p.id, name: p.name, members: roster.filter((r) => r.pair_id === p.id).map((r) => r.name) })),
     },
     cards,

@@ -9,6 +9,9 @@ import { PumpkinCat } from "./PumpkinCat";
 import type { GameState } from "./types";
 import { post } from "./util";
 import { RoleCharacter } from "./GhostAnim";
+import { AccountBox, profileKey, RankBadge, RankPanel, RecoverForm } from "./Rank";
+import { play } from "./sound";
+import { buzz } from "./util";
 
 type Toast = (text: string, bad?: boolean) => void;
 
@@ -32,6 +35,10 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [consent, setConsent] = useState(false);
+  const [abandonOk, setAbandonOk] = useState(false);
+  const [recover, setRecover] = useState(false);
+  const [recoverMsg, setRecoverMsg] = useState<{ text: string; bad: boolean } | null>(null);
 
   // A shared link (…/?p=ABCDE) opens straight on "Entra" with the game code filled in.
   useEffect(() => {
@@ -68,8 +75,8 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
     setErr(null);
     try {
       const body =
-        mode === "create" ? { action: "create", zone, missionsMode, name }
-        : mode === "join" ? { action: "join", gameCode, name }
+        mode === "create" ? { action: "create", zone, missionsMode, name, consent, profile: profileKey() }
+        : mode === "join" ? { action: "join", gameCode, name, consent, profile: profileKey() }
         : { action: "rejoin", code };
       await post("/api/lobby", body);
       if (mode !== "code" && photo) await uploadAvatar(photo).catch(() => {});
@@ -112,6 +119,13 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
         <input id="join-name" className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={20} autoComplete="nickname" placeholder="Mara" />
       </label>
       <p className="muted small">Il ruolo non si sceglie: cercatori e fuggiaschi si estraggono a sorte in lobby. Il compagno di fuga invece lo scegliete voi.</p>
+      <label className="consent">
+        <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+        <span>
+          Accetto le <a href="/regole" target="_blank" rel="noreferrer">regole e la sicurezza</a> e la{" "}
+          <a href="/privacy" target="_blank" rel="noreferrer">privacy</a>.
+        </span>
+      </label>
     </>
   );
 
@@ -143,7 +157,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
               <span className="muted small">Chiedi le 5 lettere a chi ha creato la partita, o apri il link che ti ha mandato.</span>
             )}
             {who}
-            <button type="submit" className="btn a" disabled={busy || gameCode.length !== 5 || name.trim().length < 2}>{busy ? "Entro…" : "Entra in partita"}</button>
+            <button type="submit" className="btn a" disabled={busy || !consent || gameCode.length !== 5 || name.trim().length < 2}>{busy ? "Entro…" : "Entra in partita"}</button>
           </>
         )}
 
@@ -167,9 +181,18 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
                 <button type="button" className={missionsMode === "abbandonati" ? "on" : ""} onClick={() => setMissionsMode("abbandonati")}>Posti abbandonati</button>
               </div>
               <span className="muted small">{missionsMode === "chill" ? "Piazze, parchi e luoghi del quartiere." : "Edifici e luoghi abbandonati del quartiere, più qualche missione classica se sono pochi."}</span>
+              {missionsMode === "abbandonati" && (
+                <label className="consent abandonwarn">
+                  <input type="checkbox" checked={abandonOk} onChange={(e) => setAbandonOk(e.target.checked)} />
+                  <span>
+                    Ho capito: i posti abbandonati possono essere pericolanti, e entrare in un edificio privato o recintato è reato.
+                    Le missioni si fanno da fuori, salvo luoghi aperti a tutti, e ognuno decide per sé.
+                  </span>
+                </label>
+              )}
             </div>
             {who}
-            <button type="submit" className="btn a" disabled={busy || name.trim().length < 2}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
+            <button type="submit" className="btn a" disabled={busy || !consent || (missionsMode === "abbandonati" && !abandonOk) || name.trim().length < 2}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
             <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice con il tuo gruppo.</span>
           </>
         )}
@@ -187,6 +210,12 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
         {err && <div className="notice" style={{ background: "var(--threat-soft)", color: "#ff5a62" }}>{err}</div>}
       </div>
       {onGuide && <button type="button" className="linkbtn guidelink" onClick={onGuide}>Come funziona? Rivedi la guida</button>}
+      <div className="joinrecover">
+        <button type="button" className="linkbtn" onClick={() => setRecover(!recover)}>Hai già un rango su un altro telefono? Recuperalo</button>
+        {recover && <RecoverForm toast={(text, bad = false) => setRecoverMsg({ text, bad })} onDone={() => setRecover(false)} />}
+        {recoverMsg && <div className="notice" style={recoverMsg.bad ? { background: "var(--threat-soft)", color: "#ff5a62" } : undefined}>{recoverMsg.text}</div>}
+      </div>
+      <p className="muted small legal-links"><a href="/regole">Regole e sicurezza</a> · <a href="/privacy">Privacy</a></p>
     </form>
   );
 }
@@ -214,6 +243,45 @@ export function ShareGame({ code, zoneName, toast }: { code: string; zoneName: s
       </div>
       <button type="button" className="btn a sm" onClick={share}>Condividi</button>
     </div>
+  );
+}
+
+/** The role as a face-down card: tap to turn it over (once per round; then it stays turned). */
+function RoleCard({ role, revealKey }: { role: "HUNTER" | "FUGITIVE" | null; revealKey: string }) {
+  const seen = () => { try { return localStorage.getItem(revealKey) === "1"; } catch { return false; } };
+  const [open, setOpen] = useState(() => typeof window !== "undefined" && role != null && seen());
+  const [shake, setShake] = useState(false);
+  const reveal = () => {
+    if (!role || open) return;
+    setShake(true);
+    setTimeout(() => {
+      setShake(false);
+      setOpen(true);
+      play("card");
+      buzz(role === "HUNTER" ? [80, 60, 160] : [60, 40, 60]);
+      try { localStorage.setItem(revealKey, "1"); } catch {}
+    }, 450);
+  };
+  const hunter = role === "HUNTER";
+  return (
+    <>
+      <button type="button" className={`rolecard ${open ? "open" : ""} ${shake ? "shake" : ""}`} onClick={reveal} disabled={!role} aria-label={role ? (open ? (hunter ? "Sei un cercatore" : "Sei un fuggiasco") : "Tocca per scoprire il tuo ruolo") : "Ruolo non ancora estratto"}>
+        <span className="rc-inner">
+          <span className="rc-face rc-back">
+            <span className="rc-q">?</span>
+            <span className="rc-t">{role ? "Tocca per scoprire" : "In attesa dell'estrazione"}</span>
+          </span>
+          {role && (
+            <span className={`rc-face rc-front ${hunter ? "hunter" : "fugitive"}`}>
+              {open && <RoleCharacter role={role} size={120} />}
+              <span className="rc-role">{hunter ? "Cercatore" : "Fuggiasco"}</span>
+              <span className="rc-sub">{hunter ? "Dai la caccia ai fuggiaschi e ruba i loro punti." : "Scappa con il tuo compagno e fai le missioni."}</span>
+            </span>
+          )}
+        </span>
+      </button>
+      {!role && <p className="muted small" style={{ textAlign: "center", margin: 0 }}>Cercatore o fuggiasco? Lo decide la sorte quando l&apos;organizzatore estrae i ruoli.</p>}
+    </>
   );
 }
 
@@ -259,8 +327,9 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
     return (
       <div key={p.id} className="cell">
         <span className="row" style={{ gap: 10, justifyContent: "flex-start", minWidth: 0 }}>
-          <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={34} kind={p.role === "HUNTER" ? "hunter" : "fugitive"} />
+          <Avatar id={p.id} name={p.name} at={s.avatars[p.id]} size={34} kind="fugitive" />
           <span style={{ fontWeight: me ? 600 : 400, color: me ? "var(--accent)" : undefined }}>{p.name}{me ? " (tu)" : ""}</span>
+          <RankBadge index={p.rank} size={18} />
           {host && <span className="chip a">Organizzatore</span>}
           {rolesDrawn && !s.game.drawn && p.role === "FUGITIVE" && (mateOf(p) ? <span className="chip fa">coppia ✓</span> : p.partnerPick ? <span className="chip">ha scelto {byId.get(p.partnerPick)?.name}</span> : null)}
         </span>
@@ -321,23 +390,15 @@ export function Lobby({ s, refresh, toast, openRules, openHost }: { s: GameState
       <div className="box">
         <div className="row">
           <span className="row" style={{ gap: 12, justifyContent: "flex-start" }}>
-            <AvatarPicker id={s.me.id} name={s.me.name} at={s.avatars[s.me.id]} size={48} kind={s.me.role === "HUNTER" ? "hunter" : "fugitive"} onDone={() => { toast("Foto profilo aggiornata."); refresh(); }} onError={(m) => toast(m, true)} />
+            <AvatarPicker id={s.me.id} name={s.me.name} at={s.avatars[s.me.id]} size={48} kind="fugitive" onDone={() => { toast("Foto profilo aggiornata."); refresh(); }} onError={(m) => toast(m, true)} />
             <span className="lbl">Il tuo ruolo</span>
           </span>
           <span className="small muted">rientro <span className="code">{s.me.rejoinCode}</span></span>
         </div>
-        {s.me.role ? (
-          <>
-            <RoleCharacter role={s.me.role} />
-            <div className={`roleverdict ${s.me.role === "HUNTER" ? "hunter" : "fugitive"}`}>{s.me.role === "HUNTER" ? "Sei un cercatore" : "Sei un fuggiasco"}</div>
-          </>
-        ) : (
-          <div className="roleverdict unknown">
-            <span className="q" aria-hidden="true">?</span>
-            Cercatore o fuggiasco? Lo decide la sorte quando l&apos;organizzatore estrae i ruoli.
-          </div>
-        )}
+        <RoleCard key={`${s.me.id}-r${s.game.round}-${s.me.role ?? "none"}`} role={s.me.role} revealKey={`cnh_reveal_${s.me.id}_r${s.game.round}`} />
       </div>
+      {s.rank && <RankPanel rank={s.rank} />}
+      <AccountBox key={s.rank?.account ?? "none"} rank={s.rank} refresh={refresh} toast={toast} />
 
       {rolesDrawn && !s.game.drawn && s.me.role === "FUGITIVE" && (
         <section className="field">

@@ -61,13 +61,15 @@ export interface GameState {
     hostId: string | null; hostName: string | null; hostStale: boolean; captureBounty: number; zoneRadiusM: number;
   };
   me: { id: string; name: string; role: Role | null; status: "ACTIVE" | "CAPTURED"; pairId: string | null; rejoinCode: string; spectator: boolean };
+  /** Rank of this phone's profile (null for players without one). */
+  rank: { index: number; name: string; min: number; color: string; glow: string; rp: number; next: { name: string; min: number } | null; games: number; podiums: number; wins: number; account: string | null; award: { place: number; rp: number; before: string } | null } | null;
   /** Open SOS calls, with the live position of whoever sent them. */
   sos: { id: number; playerId: string; name: string; lat: number | null; lng: number | null; acc: number | null; fixAt: string | null; at: string; responders: string[]; mine: boolean }[];
   hostView: { id: string; name: string; role: Role | null; status: string; spectator: boolean; rejoinCode: string; lastSeen: string | null }[] | null;
   avatars: Record<string, number>;
   typing: { id: string; name: string; channel: Message["channel"]; audio: boolean }[];
   lobby: {
-    players: { id: string; name: string; role: Role | null; pairId: string | null; spectator: boolean; partnerPick: string | null }[];
+    players: { id: string; name: string; role: Role | null; pairId: string | null; spectator: boolean; partnerPick: string | null; rank: number }[];
     pairs: { id: string; name: string; members: string[] }[];
   };
   cards: Card[];

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { Map as MLMap, GeoJSONSource } from "maplibre-gl";
+import { liteGraphics, markLiteGraphics } from "./device";
 import { Glyph } from "./Icons";
 import type { Fix, LngLat } from "./types";
 
@@ -90,6 +91,9 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
   const followed = useRef(false);
   const fx = useRef<import("./map3d").Map3D | null>(null);
   const [fxReady, setFxReady] = useState(false);
+  // Bumped when Safari kills the map's graphics (too much memory on an old phone): rebuilt in light mode.
+  const [gen, setGen] = useState(0);
+  const [recovered, setRecovered] = useState(false);
   const clickRef = useRef(onMapClick);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
 
@@ -102,7 +106,10 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
         ml.setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
         if (cancelled || !el.current) return;
         const xs = boundary.map((p) => p[0]), ys = boundary.map((p) => p[1]);
+        const lite = liteGraphics();
         const m = new ml.Map({
+          // Light mode: fewer pixels to draw and keep in memory.
+          pixelRatio: lite ? Math.min(window.devicePixelRatio || 1, 1.5) : undefined,
           container: el.current,
           style: STYLE,
           bounds: [[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.max(...ys)]],
@@ -115,6 +122,13 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
           dragRotate: false,
         });
         m.touchZoomRotate.disableRotation();
+        m.getCanvas().addEventListener("webglcontextlost", (e) => {
+          e.preventDefault();
+          if (cancelled) return;
+          markLiteGraphics();
+          setRecovered(true);
+          setGen((n) => n + 1);
+        });
         m.addControl(new ml.NavigationControl({ showCompass: false }), "top-right");
         m.on("click", (e: { lngLat: { lng: number; lat: number } }) => clickRef.current?.(e.lngLat.lng, e.lngLat.lat));
         m.on("load", () => {
@@ -181,7 +195,7 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
           import("./map3d")
             .then(({ Map3D }) => {
               if (cancelled) return;
-              const f = new Map3D(m, ml, [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]);
+              const f = new Map3D(m, ml, [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2], lite);
               m.addLayer(f.layer, "people-label");
               fx.current = f;
               setFxReady(true);
@@ -201,12 +215,15 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
     })();
     return () => {
       cancelled = true;
+      fx.current = null;
       map.current?.remove();
       map.current = null;
+      setReady(false);
+      setFxReady(false);
     };
-    // The map is created once; data updates go through the effect below.
+    // The map is created once (again only after a graphics crash); data updates go through the effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [gen]);
 
   useEffect(() => {
     const m = map.current;
@@ -259,6 +276,7 @@ export default function MapView({ boundary, fix, points = [], quests = [], zones
     <div className="mapbox">
       <div ref={el} className="ml" />
       {failed && <div className="full"><p className="muted">La mappa non si è caricata. Controlla la connessione.</p></div>}
+      {recovered && <button type="button" className="chip glass maplite" onClick={() => setRecovered(false)}>Mappa ricaricata in modalità leggera ✕</button>}
       {fix && (
         <button type="button" className="fab glass" style={{ position: "absolute", right: 12, bottom: "calc(var(--safe-bottom) + 92px)", zIndex: 6 }} onClick={centerOnMe} aria-label="Centra su di me">
           <Glyph.locate />

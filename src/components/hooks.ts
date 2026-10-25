@@ -12,8 +12,8 @@ export function useNow(offset: number) {
   return now;
 }
 
-const SEND_EVERY_MS = 15_000;
-const SEND_MOVE_M = 15;
+const SEND_EVERY_MS = 5_000;
+const SEND_MOVE_M = 8;
 // A fix this rough (cell towers / Wi-Fi) is ignored while a good GPS fix is still fresh.
 const COARSE_M = 150;
 const GOOD_M = 60;

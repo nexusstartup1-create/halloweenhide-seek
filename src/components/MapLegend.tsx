@@ -196,7 +196,7 @@ export function MapLegend({ look, targets, onFocus }: { look: "fugitive" | "hunt
             Modello 3D del cercatore:{" "}
             <a href="https://sketchfab.com/3d-models/jason-108997898ac241ccb1ee509120e6bb46" target="_blank" rel="noreferrer">“jason”</a> di{" "}
             <a href="https://sketchfab.com/skull-gamer" target="_blank" rel="noreferrer">skull-GamerYT</a>, licenza{" "}
-            <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a> (compresso per il web).
+            <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a> (corpo e scheletro; maschera, tunica e machete ridisegnati per Night Hunt).
           </p>
         </Sheet>
       )}

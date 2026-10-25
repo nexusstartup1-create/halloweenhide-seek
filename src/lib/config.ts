@@ -16,9 +16,10 @@ export const FLASH_EVERY_MIN = 20;
 export const FLASH_LEN_MIN = 10;
 export const FLASH_MULT = 2;
 /**
- * Hunters always see each active fugitive as a circle of ZONE_RADIUS_M. The fugitive is somewhere
- * inside it (the centre is shifted at random by up to ZONE_MAX_OFFSET_M), and the circle moves only
- * once every ZONE_REFRESH_S, the same for every hunter, so it can't be averaged back to the real spot.
+ * Hunters always see each active fugitive as a circle of ZONE_RADIUS_M that follows them in real time.
+ * The fugitive is somewhere inside it: the centre is shifted from the real spot by a random offset
+ * (up to ZONE_MAX_OFFSET_M) that changes only once every ZONE_REFRESH_S, the same for every hunter,
+ * so the circle can't be averaged back to the exact position.
  */
 export const ZONE_RADIUS_M = 80;
 export const ZONE_MAX_OFFSET_M = 55;

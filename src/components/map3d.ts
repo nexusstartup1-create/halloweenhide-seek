@@ -165,9 +165,10 @@ export class Map3D {
   private tether: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial } | null = null;
   private start = performance.now();
   private still: boolean;
+  private nextFrame: ReturnType<typeof setTimeout> | null = null;
   readonly layer: CustomLayerInterface;
 
-  constructor(map: MLMap, ml: typeof import("maplibre-gl"), center: [number, number]) {
+  constructor(map: MLMap, ml: typeof import("maplibre-gl"), center: [number, number], readonly lite = false) {
     this.map = map;
     this.ml = ml;
     this.still = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -205,7 +206,7 @@ export class Map3D {
         const m = new THREE.Matrix4().fromArray(args.defaultProjectionData.mainMatrix as unknown as number[]);
         this.camera.projectionMatrix = m.multiply(this.transform);
         this.renderer.resetState();
-        if (!this.env) {
+        if (!this.env && !this.lite) {
           // Soft studio light for reflections on the hunter's mask and skin. Made once, here
           // (not in onAdd) because it renders offscreen and the map resets its GL state after this hook.
           const pm = new THREE.PMREMGenerator(this.renderer);
@@ -215,7 +216,10 @@ export class Map3D {
           this.renderer.resetState();
         }
         this.renderer.render(this.scene, this.camera);
-        if (!this.still) this.map.triggerRepaint();
+        // Animate at a capped frame rate (lighter on battery and graphics memory than every frame).
+        if (!this.still && !this.nextFrame) {
+          this.nextFrame = setTimeout(() => { this.nextFrame = null; this.map.triggerRepaint(); }, this.lite ? 50 : 28);
+        }
       },
       onRemove: () => this.dispose(),
     };
@@ -320,12 +324,12 @@ export class Map3D {
 
     if (look === "fugitive") {
       // Carved jack-o'-lantern lit from inside (pumpkin3d.ts).
-      const pk = makePumpkin(eyeColor, keep);
+      const pk = makePumpkin(eyeColor, keep, this.lite);
       body.add(pk.body);
       mats.push(...pk.mats);
       update = pk.update;
     } else if (look === "hunter") {
-      const h = makeHunter(keep);
+      const h = makeHunter(keep, this.lite);
       body.add(h.body);
       mats.push(...h.mats);
       update = h.update;
@@ -591,6 +595,7 @@ export class Map3D {
   }
 
   dispose() {
+    if (this.nextFrame) clearTimeout(this.nextFrame);
     for (const e of [...this.quests.values(), ...this.people.values(), ...this.zones]) e.dispose();
     this.quests.clear();
     this.people.clear();

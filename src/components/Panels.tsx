@@ -36,8 +36,9 @@ function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange:
   );
 }
 
-export function SettingsSheet({ onClose, sound, setSound, vibe, setVibe, glassClear, setGlassClear, isHost, openHost, openRules, radioFx, setRadioFx, radioAuto, setRadioAuto }: {
+export function SettingsSheet({ onClose, sound, setSound, vibe, setVibe, glassClear, setGlassClear, isHost, openHost, openRules, radioFx, setRadioFx, radioAuto, setRadioAuto, onDeleteData }: {
   onClose: () => void;
+  onDeleteData: () => Promise<void>;
   radioFx: "police" | "ghost"; setRadioFx: (fx: "police" | "ghost") => void;
   radioAuto: boolean; setRadioAuto: (v: boolean) => void;
   sound: boolean; setSound: (v: boolean) => void;
@@ -65,7 +66,26 @@ export function SettingsSheet({ onClose, sound, setSound, vibe, setVibe, glassCl
       <p className="muted small">Con l&apos;ascolto automatico i messaggi radio partono dall&apos;altoparlante appena arrivano: in tasca vicino a un cercatore, si sentono.</p>
       <button type="button" className="btn" onClick={openRules}>Regole del gioco</button>
       {isHost && <button type="button" className="btn a" onClick={openHost}>Pannello organizzatore</button>}
+      <p className="muted small legal-links"><a href="/regole" target="_blank" rel="noreferrer">Regole e sicurezza</a> · <a href="/privacy" target="_blank" rel="noreferrer">Privacy</a></p>
+      <DeleteData onDelete={onDeleteData} />
     </Sheet>
+  );
+}
+
+/** "Cancella i miei dati": hidden behind a second tap, then a 2-second hold. */
+function DeleteData({ onDelete }: { onDelete: () => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (!open) return <button type="button" className="linkbtn" onClick={() => setOpen(true)}>Cancella i miei dati</button>;
+  return (
+    <div className="dangerzone">
+      <p>
+        Cancelli te stesso dalla partita e tutto quello che hai lasciato: posizione e percorso, foto profilo, vocali, foto e video delle missioni che hai caricato, e il tuo rango con l&apos;account.
+        I punti già vinti restano alla coppia. Non si può annullare.
+      </p>
+      <HoldButton label={busy ? "Cancello…" : "Tieni premuto per cancellare tutto"} ms={2000} disabled={busy} onFire={async () => { setBusy(true); await onDelete().finally(() => setBusy(false)); }} />
+      <button type="button" className="linkbtn" onClick={() => setOpen(false)}>Annulla</button>
+    </div>
   );
 }
 
@@ -201,6 +221,8 @@ export function RulesSheet({ s, onClose }: { s: GameState; onClose: () => void }
         <p>Chi viene catturato passa con i cercatori: <b>cattura esattamente come loro</b> con la password (mai il proprio ex compagno), i punti rubati sono suoi e conta nella classifica dei cercatori. In più ha il <b>Sussurro</b> per rivelare il settore di un fuggiasco.</p>
         <h4>Chi vince</h4>
         <p>Se sono tutti presi vince il cercatore (o il fantasma) con più punti. Altrimenti, allo scadere, vince la coppia ancora in gioco con più punti.</p>
+        <h4>Ranghi</h4>
+        <p>Il rango resta al tuo telefono da una partita all&apos;altra: Novellino, Ombra (40 RP), Predatore (100), Spettro (200), Incubo (350), Leggenda (550). Si sale solo sul podio: 30 RP al primo posto, 20 al secondo, 10 al terzo. Se vincono i cercatori il podio è dei cercatori, se vincono i fuggiaschi delle coppie (a tutti e due). Contano solo le partite con almeno 4 giocatori in strada.</p>
         <h4>Sicurezza</h4>
         <p>Si gioca di notte in strada: attenzione al traffico, niente corse in carreggiata, rispetto per chi abita lì. I luoghi abbandonati al buio possono essere pericolosi e spesso sono proprietà privata.</p>
       </div>

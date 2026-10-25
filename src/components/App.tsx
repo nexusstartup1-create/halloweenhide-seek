@@ -277,7 +277,8 @@ export default function App() {
   else if (tab === "main") screen = hunter ? <Capture s={s} refresh={refresh} toast={toast} /> : <Missions s={s} fix={fix} refresh={refresh} toast={toast} />;
   else screen = <Deck s={s} now={now} refresh={refresh} toast={toast} />;
 
-  const roleLabel = spectator ? "Spettatore" : hunter ? "Cercatore" : ghost ? "Fantasma · caccia con i cercatori" : s.fugitive ? `Fuggiasco · ${s.fugitive.pair.name}` : s.me.role === "FUGITIVE" ? "Fuggiasco" : "In lobby";
+  // In the lobby the role stays a secret until the card is turned over.
+  const roleLabel = phase === "LOBBY" ? "In lobby" : spectator ? "Spettatore" : hunter ? "Cercatore" : ghost ? "Fantasma · caccia con i cercatori" : s.fugitive ? `Fuggiasco · ${s.fugitive.pair.name}` : s.me.role === "FUGITIVE" ? "Fuggiasco" : "In lobby";
   const isOn = (id: Tab) => id === tab || (!fullNav && id === "hud" && tab !== "comms");
   const tabBtn = (id: Tab, label: string, icon: React.ReactNode, extra = "") => (
     <button type="button" className={`${extra} ${isOn(id) ? "on" : ""}`} onClick={() => setTab(id)} aria-current={isOn(id) ? "page" : undefined}>
@@ -295,7 +296,7 @@ export default function App() {
           id={s.me.id}
           name={s.me.name}
           at={s.avatars[s.me.id]}
-          kind={hunter ? "hunter" : ghost ? "ghost" : "fugitive"}
+          kind={phase === "LOBBY" ? "fugitive" : hunter ? "hunter" : ghost ? "ghost" : "fugitive"}
           onDone={() => { toast("Foto profilo aggiornata."); refresh(); }}
           onError={(m) => toast(m, true)}
         />
@@ -370,6 +371,14 @@ export default function App() {
       {sheet === "settings" && (
         <SettingsSheet
           onClose={() => setSheet(null)}
+          onDeleteData={async () => {
+            const res = await fetch("/api/me", { method: "DELETE" });
+            if (!res.ok) { toast((await res.json().catch(() => ({}))).error ?? "Cancellazione non riuscita. Riprova.", true); return; }
+            setSheet(null);
+            setS(null);
+            setAuth("out");
+            toast("I tuoi dati sono stati cancellati.");
+          }}
           sound={sound}
           setSound={(v) => { saveSound(v); setSoundState(v); if (v) play("card"); }}
           vibe={vibe}

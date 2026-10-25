@@ -12,6 +12,7 @@ import { Sheet } from "./Panels";
 import { Icon } from "./Icons";
 import MapView, { sectorCenter, type MapPoint } from "./MapView";
 import { Replay } from "./Replay";
+import { RankAward } from "./Rank";
 import { MapLegend, type LegendTarget, type LegendTargets } from "./MapLegend";
 import type { Card, Channel, Fix, GameState, Message } from "./types";
 import { CARD_INFO, ago, buzz, clock, post, pts } from "./util";
@@ -176,6 +177,7 @@ export function Results({ s, refresh, toast }: { s: GameState; refresh: () => vo
       .then((d) => setAlbum(d.proofs ?? []))
       .catch(() => setAlbum([]));
   }, []);
+  const [asked, setAsked] = useState(false);
   const again = async () => {
     try {
       await post("/api/lobby", { action: "newRound" });
@@ -184,13 +186,26 @@ export function Results({ s, refresh, toast }: { s: GameState; refresh: () => vo
       toast((e as Error).message, true);
     }
   };
+  const ask = async () => {
+    try {
+      await post("/api/lobby", { action: "askLobby" });
+      setAsked(true);
+      toast(`Richiesta mandata a ${s.game.hostName ?? "l'organizzatore"}.`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+  const canRestart = s.game.hostId === s.me.id || s.game.hostStale;
+  const back = <BackToLobby canRestart={canRestart} asked={asked} hostName={s.game.hostName} onRestart={again} onAsk={ask} />;
   return (
     <div className="pad">
+      {back}
       <div className="lbl">Partita finita</div>
       <div className="mega">{w ? w.name : "Fine"}</div>
       <div className="box a">
         <span className="lbl">{w?.kind === "HUNTER" ? "Vincono i cercatori · classifica individuale" : "Vincono i fuggiaschi · classifica a coppie"}</span>
       </div>
+      {s.rank && <RankAward rank={s.rank} />}
       <button type="button" className="btn a replaybtn" onClick={() => setReplay(true)}>▶ Guarda il replay della serata</button>
       {replay && <Replay onClose={() => setReplay(false)} />}
       {r && (w?.kind === "HUNTER" ? (
@@ -221,13 +236,34 @@ export function Results({ s, refresh, toast }: { s: GameState; refresh: () => vo
           </figure>
         ))}
       </div>
-      {s.game.hostId === s.me.id || s.game.hostStale ? (
-        <>
-          <HoldButton label="Tieni premuto per una nuova partita" onFire={again} ms={1500} />
-          <p className="muted small">Si torna in lobby con gli stessi giocatori. Coppie e password si estraggono di nuovo.</p>
-        </>
+      {back}
+    </div>
+  );
+}
+
+/** "Back to the lobby": the host restarts (after a confirm, results go away); the others ask the host. */
+function BackToLobby({ canRestart, asked, hostName, onRestart, onAsk }: { canRestart: boolean; asked: boolean; hostName: string | null; onRestart: () => void; onAsk: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  if (!canRestart) {
+    return (
+      <div className="backlobby">
+        <button type="button" className="btn" onClick={onAsk} disabled={asked}>{asked ? "✓ Richiesta mandata" : "↩ Chiedi di tornare in lobby"}</button>
+        <span className="small muted">Torna in lobby {hostName ?? "l'organizzatore"} per tutti, con gli stessi giocatori.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="backlobby">
+      {!confirm ? (
+        <button type="button" className="btn a" onClick={() => setConfirm(true)}>↩ Torna alla lobby</button>
       ) : (
-        <div className="notice">Per una nuova partita aspetta {s.game.hostName ?? "l'organizzatore"}.</div>
+        <>
+          <span className="small">Tutti tornano in lobby con gli stessi giocatori e si estraggono di nuovo ruoli e coppie. <b>Classifica, album e replay di questa partita non saranno più visibili.</b></span>
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn" style={{ flex: 1 }} onClick={() => setConfirm(false)}>Annulla</button>
+            <button type="button" className="btn a" style={{ flex: 1 }} onClick={onRestart}>Torna alla lobby</button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -283,7 +319,7 @@ export function FugitiveHud({ s, now }: { s: GameState; now: number }) {
       {fog ? (
         <div className="notice">Nebbia attiva · sei sparito dalla mappa dei cercatori · {clock(+new Date(fog.activeUntil!) - now)}</div>
       ) : s.game.phase === "LIVE" ? (
-        <div className="notice" style={{ background: "var(--threat-soft)", color: "#ff5a62" }}>I cercatori vedono la tua zona: un cerchio di {s.game.zoneRadiusM} m, aggiornato ogni minuto.</div>
+        <div className="notice" style={{ background: "var(--threat-soft)", color: "#ff5a62" }}>I cercatori vedono la tua zona: un cerchio di {s.game.zoneRadiusM} m che ti segue in tempo reale (tu sei dentro, non per forza al centro).</div>
       ) : null}
       <div className="box a">
         <div className="row"><span className="lbl">Pool di coppia</span><span className="chip a">{f.pair.active}/2 attivi</span></div>
@@ -711,7 +747,7 @@ export function MapTab({ s, fix, geoError }: { s: GameState; fix: Fix | null; ge
         {edge && <div className="alert">{edge}</div>}
         {s.hunter?.pings.length ? <span className="chip r glass">Ping attivo · {s.hunter.pings[0].hunter}</span> : null}
         {s.hunter?.track && <span className="chip fa">Traccia {s.hunter.track.sector}</span>}
-        {s.hunter && s.game.phase === "LIVE" && <span className="chip glass">{s.hunter.zones.length} zone · aggiornate ogni minuto</span>}
+        {s.hunter && s.game.phase === "LIVE" && <span className="chip glass">{s.hunter.zones.length} zone · in tempo reale</span>}
         {s.hunter && s.game.phase === "HEAD_START" && <span className="chip glass">Le zone dei fuggiaschi compaiono a caccia aperta</span>}
       </div>
       <div className="mapover bottom">

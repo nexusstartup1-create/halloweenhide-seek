@@ -4,6 +4,7 @@
 // Textures are painted on canvases at runtime. Facing +z, standing on y = 0, about 5.5 units tall.
 import * as THREE from "three";
 import { blobPath, canvas, glowTexture, grain, normalFrom, rng, texture } from "./hunterTextures";
+import { shrinkCanvas } from "./device";
 
 type Disposable = { dispose: () => void };
 type Keep = <T extends Disposable>(x: T) => T;
@@ -63,12 +64,12 @@ function fbm(x: number, y: number, seed: number, oct = 4) {
 
 /** Shared by every pumpkin: painted once (it takes a moment), only the glow colour differs per pumpkin. */
 let pumpkinTex: ReturnType<typeof paintPumpkin> | null = null;
-function pumpkinTextures() {
-  pumpkinTex ??= paintPumpkin();
+function pumpkinTextures(lite: boolean) {
+  pumpkinTex ??= paintPumpkin(lite ? 1024 : 2048);
   return pumpkinTex;
 }
 
-function paintPumpkin() {
+function paintPumpkin(maxSide = 2048) {
   const W = 2048, H = 1024;
   const col = canvas(W, H), hgt = canvas(W, H), emi = canvas(W, H), rough = canvas(W, H);
   const C = col.g, Hh = hgt.g, E = emi.g, Ro = rough.g;
@@ -197,7 +198,8 @@ function paintPumpkin() {
     Ro.fillStyle = "#f0f0f0"; Ro.fill(hole);
   }
   grain(C, W, H, 6, r);
-  return { map: texture(col.c, true), normal: normalFrom(hgt.c, 4), emissive: texture(emi.c, true), rough: texture(rough.c, false) };
+  const fit = (c: HTMLCanvasElement) => shrinkCanvas(c, maxSide);
+  return { map: texture(fit(col.c), true), normal: normalFrom(fit(hgt.c), 4), emissive: texture(fit(emi.c), true), rough: texture(fit(rough.c), false) };
 }
 
 /** Ribbed, slightly lopsided pumpkin with dimples at both poles. Ribs follow the texture's u. */
@@ -239,10 +241,10 @@ function stemTexture() {
   return { map: texture(c, true), normal: normalFrom(c, 3) };
 }
 
-export function makePumpkin(eyeColor: THREE.Color, keep: Keep) {
+export function makePumpkin(eyeColor: THREE.Color, keep: Keep, lite = false) {
   const mats: THREE.Material[] = [];
   const body = new THREE.Group();
-  const tex = pumpkinTextures();
+  const tex = pumpkinTextures(lite);
   const st = stemTexture();
   const glowMap = glowTexture();
   // The pumpkin textures are shared by all pumpkins and kept for the session (not disposed here).

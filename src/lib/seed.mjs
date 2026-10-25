@@ -176,6 +176,43 @@ create table if not exists tracks (
 create index if not exists tracks_game_player on tracks(game_id, player_id, id);
 
 -- ---------- SOS: a player needs help; the game pauses until the host resumes ----------
+alter table players add column if not exists consented_at timestamptz;
+alter table players add column if not exists blur_dx real;
+alter table players add column if not exists blur_dy real;
+
+-- ---------- ranks: a profile per phone, kept across games ----------
+create table if not exists profiles (
+  id text primary key, -- sha-256 of the secret key kept on the phone
+  name text not null,
+  rp int not null default 0,
+  games int not null default 0,
+  podiums int not null default 0,
+  wins int not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table players add column if not exists profile_id text;
+-- Rank recovery: a name and password chosen by the player; each phone's secret key points to a profile.
+alter table profiles add column if not exists username text;
+alter table profiles add column if not exists password_hash text;
+alter table profiles add column if not exists failed int not null default 0;
+alter table profiles add column if not exists locked_until timestamptz;
+create unique index if not exists profiles_username on profiles(username);
+create table if not exists profile_keys (
+  key_hash text primary key,
+  profile_id text not null,
+  at timestamptz not null default now()
+);
+create table if not exists rank_awards (
+  game_id int not null,
+  profile_id text not null,
+  place int not null,
+  rp int not null,
+  rp_after int not null,
+  at timestamptz not null default now(),
+  primary key (game_id, profile_id)
+);
+
 create table if not exists sos (
   id bigserial primary key,
   game_id int not null,
