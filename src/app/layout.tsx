@@ -1,6 +1,14 @@
 import type { Metadata, Viewport } from "next";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
+import { SourceEgg } from "@/components/SourceEgg";
+import { REPO_URL } from "@/lib/repo";
+
+// Shows up at the top of "Visualizza sorgente pagina" for anyone who peeks.
+const SOURCE_NOTE = `
+  🧞  Genio della lampada, eh? Vuoi vedere il codice sorgente di Night Hunt?
+      È tutto qui, open source: ${REPO_URL}
+`;
 
 export const metadata: Metadata = {
   title: "Cirenaica Night Hunt",
@@ -21,7 +29,11 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="it">
-      <body>{children}</body>
+      <body>
+        <div style={{ display: "none" }} aria-hidden dangerouslySetInnerHTML={{ __html: `<!--${SOURCE_NOTE}-->` }} />
+        <SourceEgg />
+        {children}
+      </body>
     </html>
   );
 }
