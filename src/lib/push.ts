@@ -13,8 +13,25 @@ function configure() {
   return true;
 }
 
+/**
+ * A real Web Push endpoint is always an https URL on a public push service (Apple, Google/FCM, Mozilla,
+ * Microsoft). Rejecting anything else stops someone from saving an internal/loopback URL as their
+ * "subscription" and making the server fire POSTs at it (SSRF).
+ */
+function safeEndpoint(raw: string) {
+  let u: URL;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== "https:") return false;
+  const h = u.hostname.toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return false;
+  // Literal IPs are never used by real push services; block them (covers loopback and private ranges).
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":")) return false;
+  return true;
+}
+
 export async function saveSubscription(playerId: string, sub: webpush.PushSubscription) {
   if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) throw new Error("bad subscription");
+  if (!safeEndpoint(sub.endpoint)) throw new Error("bad subscription");
   await q(
     `insert into push_subs (endpoint, player_id, sub) values ($1, $2, $3)
      on conflict (endpoint) do update set player_id = excluded.player_id, sub = excluded.sub`,

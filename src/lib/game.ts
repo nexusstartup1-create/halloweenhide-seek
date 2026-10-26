@@ -802,6 +802,18 @@ export async function claimCapture(hunter: PlayerRow, raw: string): Promise<Capt
   if (lock.lockedS > 0) return { result: "LOCKED", lockedS: lock.lockedS };
 
   const out = await tx<CaptureResult>(async (c) => {
+    // Serialize every capture attempt by the same hunter: without this, a flood of guesses sent in
+    // parallel all read the attempt count before any of them commits, so the 5-wrong lock never fires
+    // and the (small) password space can be brute-forced in one burst.
+    await c.query("select pg_advisory_xact_lock(hashtext($1)::int8)", [hunterId]);
+    const { rows: [lk] } = await c.query<{ n: number; first: Date | null }>(
+      `select count(*)::int as n, min(at) as first from capture_attempts where hunter_id = $1 and result = 'WRONG' and at > now() - interval '${LOCK_S} seconds'`,
+      [hunterId],
+    );
+    if (lk.n >= MAX_WRONG && lk.first) {
+      return { result: "LOCKED", lockedS: Math.max(0, Math.ceil(LOCK_S - (Date.now() - +lk.first) / 1000)) };
+    }
+
     const log = (result: string, targetId: string | null = null) =>
       c.query("insert into capture_attempts (hunter_id, input, result, target_id) values ($1, $2, $3, $4)", [hunterId, pw, result, targetId]);
 
