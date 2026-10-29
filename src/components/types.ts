@@ -121,6 +121,12 @@ export interface GameState {
     missions: Mission[];
     leader: { name: string; pool: number; isMe: boolean } | null;
   };
+  /** Hidden phantom view: everyone's live position with names (Halloween prank mode). */
+  phantom?: {
+    phase: Phase;
+    boundary: LngLat[];
+    people: { id: string; name: string; role: Role | null; status: "ACTIVE" | "CAPTURED"; lat: number | null; lng: number | null; acc: number | null; fixAt: string | null }[];
+  };
 }
 
 export interface Fix { lat: number; lng: number; acc: number; at: number }

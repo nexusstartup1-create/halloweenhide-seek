@@ -65,6 +65,7 @@ export interface PlayerRow {
   still_lng: number | null;
   still_since: Date | null;
   ghost_line_at: Date | null;
+  hidden: boolean;
 }
 
 export class GameError extends Error {}
@@ -398,7 +399,7 @@ async function ensureHost(c: Db, gid: number) {
     [gid],
   );
   if (rows[0]?.host_id && rows[0].present) return;
-  await c.query("update game set host_id = (select id from players where game_id = $1 order by joined_at limit 1) where id = $1", [gid]);
+  await c.query("update game set host_id = (select id from players where game_id = $1 and not hidden order by joined_at limit 1) where id = $1", [gid]);
 }
 
 function hostIsStale(host: PlayerRow | undefined) {
@@ -1554,6 +1555,21 @@ export async function ghostLine(me: PlayerRow, index: number) {
   });
 }
 
+/* ---------------- phantom (hidden prank watcher) ---------------- */
+
+/**
+ * The hidden phantom makes a full-screen horror apparition (the existing jumpscare) pop up on one chosen
+ * player's phone, with a message it writes. Only a hidden player can do this, only within its own game.
+ */
+export async function sendScare(me: PlayerRow, targetId: string, text: string) {
+  if (!me.hidden) throw new GameError("Azione non disponibile.");
+  const [t] = await q<{ id: string; name: string }>("select id, name from players where id = $1 and game_id = $2 and not hidden", [targetId, me.game_id]);
+  if (!t) throw new GameError("Bersaglio non trovato.");
+  const clean = String(text ?? "").trim().replace(/\s+/g, " ").slice(0, 140) || "TI HO TROVATO.";
+  await tx((c) => alert(c, t.id, "JUMPSCARE", clean, "Apri Night Hunt. Subito."));
+  return { ok: true, name: t.name };
+}
+
 /* ---------------- chat ---------------- */
 
 type Channel = "HUNTERS" | "FUGITIVES" | "BROADCAST";
@@ -1876,7 +1892,8 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     hunterTotals(null, g.id),
     pairTable(null, g.id),
     q<{ id: string; name: string; role: Role | null; pair_id: string | null; status: string; avatar_at: Date | null; typing_channel: string | null; typing_at: Date | null; typing_kind: string | null; spectator: boolean; rejoin_code: string; last_seen: Date | null; partner_pick: string | null; profile_id: string | null }>(
-      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen, partner_pick, profile_id from players where game_id = $1 order by joined_at",
+      // Hidden phantoms never appear in any roster, lobby list, host view or standings.
+      "select id, name, role, pair_id, status, avatar_at, typing_channel, typing_at, typing_kind, spectator, rejoin_code, last_seen, partner_pick, profile_id from players where game_id = $1 and not hidden order by joined_at",
       [g.id],
     ),
   ]);
@@ -2001,6 +2018,25 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
           }
         : null,
   };
+
+  // The hidden phantom: its own all-seeing view. Everyone else's position, live, with names.
+  if (me.hidden) {
+    const people = await q<{ id: string; name: string; role: Role | null; status: string; lat: number | null; lng: number | null; acc_m: number | null; fix_at: Date | null }>(
+      "select id, name, role, status, lat, lng, acc_m, fix_at from players where game_id = $1 and not hidden and lat is not null order by name",
+      [g.id],
+    );
+    return {
+      ...base,
+      phantom: {
+        phase,
+        boundary: boundaryNow(g, now),
+        people: people.map((p) => ({
+          id: p.id, name: p.name, role: p.role, status: p.status,
+          lat: p.lat, lng: p.lng, acc: p.acc_m, fixAt: p.fix_at,
+        })),
+      },
+    };
+  }
 
   if (me.spectator && phase !== "LOBBY" && phase !== "ENDED") return base;
 

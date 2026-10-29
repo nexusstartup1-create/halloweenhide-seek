@@ -7,7 +7,7 @@ import { fail, json } from "@/lib/http";
 export async function GET(req: Request) {
   try {
     const g = await findGameByCode(new URL(req.url).searchParams.get("code") ?? "");
-    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1", [g.id]);
+    const [{ n }] = await q<{ n: number }>("select count(*)::int as n from players where game_id = $1 and not hidden", [g.id]);
     return json({ code: g.code, zoneName: zoneOf(g.zone).name, phase: phaseOf(g), players: n });
   } catch (e) {
     return fail(e);

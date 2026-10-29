@@ -283,6 +283,8 @@ alter table players add column if not exists still_lat double precision;
 alter table players add column if not exists still_lng double precision;
 alter table players add column if not exists still_since timestamptz;
 alter table players add column if not exists ghost_line_at timestamptz;
+-- A hidden "phantom": an invisible watcher who never shows in any list (Halloween prank mode).
+alter table players add column if not exists hidden boolean not null default false;
 create table if not exists reveals (
   id bigserial primary key,
   game_id int not null,

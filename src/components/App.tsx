@@ -10,6 +10,7 @@ import { Missions } from "./Missions";
 import { RoleIntro } from "./GhostAnim";
 import { Jumpscare } from "./Jumpscare";
 import { Onboarding, onboardingDone } from "./Onboarding";
+import { PhantomView } from "./Phantom";
 import { subscribePush } from "./PhoneSetup";
 import { RadioButton } from "./RadioButton";
 import { playRadio, radioAuto, radioFx, setRadioAuto, setRadioFx, type RadioFx } from "./radio";
@@ -303,6 +304,9 @@ export default function App() {
     if (guide) return <Onboarding onDone={() => setGuide(false)} />;
     return <Join onDone={refresh} onGuide={() => setGuide(true)} />;
   }
+
+  // The hidden phantom gets its own all-seeing screen and nothing else.
+  if (s.phantom) return <PhantomView s={s} now={now} refresh={refresh} toast={toast} />;
 
   const phase = s.game.phase;
   const inGame = phase === "HEAD_START" || phase === "LIVE" || phase === "PAUSED";

@@ -1205,3 +1205,26 @@ label.btn.off { background: var(--fill-2); color: var(--label-2); cursor: not-al
 .board-ranks { list-style: none; padding: 0 !important; }
 .board-ranks li { display: flex; align-items: center; gap: 8px; }
 .board-ranks li b { color: var(--rc); }
+
+/* ---------- phantom (hidden prank watcher) ---------- */
+.shell.phantom .main { inset: 0; }
+.phantom-panel {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 7;
+  padding: 12px 16px calc(var(--safe-bottom, 0px) + 14px);
+  border-radius: 18px 18px 0 0; max-height: 62vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, .55);
+}
+.phantom-list { display: flex; flex-direction: column; gap: 4px; max-height: 24vh; overflow-y: auto; }
+.phantom-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 9px 11px; border-radius: 12px; border: 1px solid transparent;
+  background: rgba(255, 255, 255, .05); color: inherit; text-align: left; width: 100%;
+}
+.phantom-row.sel { border-color: var(--accent); background: rgba(229, 9, 20, .16); }
+.dotrole { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.dotrole.h { background: #4aa3ff; }
+.dotrole.f { background: #8cf25a; }
+.dotrole.g { background: #a970ff; }
+.phantom-templates { display: flex; flex-wrap: wrap; gap: 6px; }
+.phantom-templates .chip { font-size: 12px; }
