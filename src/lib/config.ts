@@ -95,6 +95,16 @@ export const PAIR_NAMES = [
 /** Name for a fugitive drawn alone when the count is odd. */
 export const SOLO_NAME = "Il Lupo Solitario";
 
+/**
+ * A fixed couple: whenever both of these play, they are always fugitives and always paired together,
+ * whatever the random draw says. Each inner list is the accepted spellings of one person's name
+ * (lowercase, spaces collapsed — matched against the name typed when joining).
+ */
+export const FIXED_COUPLE: [string[], string[]] = [
+  ["galli figo", "galli figo 1", "galli figo uno"],
+  ["galli figo due", "galli figo 2", "galli figo ii"],
+];
+
 export const PASSWORD_WORDS = [
   "ZUCCA", "CIMITERO", "STREGA", "LAPIDE", "CORVO", "MUMMIA", "LANTERNA", "RAGNO",
   "VAMPIRO", "FANTASMA", "SCHELETRO", "PIPISTRELLO", "RAGNATELA", "CRIPTA", "GUFO", "LUPO",
