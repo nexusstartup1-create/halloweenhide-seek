@@ -25,6 +25,23 @@ const ZONE_OPTIONS = [
 ] as const;
 type ZoneOption = (typeof ZONE_OPTIONS)[number]["key"];
 
+/** Real nearby places from Italian Wikipedia, fetched in the browser (a normal IP, no datacenter blocking). */
+async function wikiPlaces(lat: number, lng: number, radiusM: number): Promise<{ name: string; lat: number; lng: number }[]> {
+  try {
+    const r = Math.max(120, Math.min(10_000, Math.round(radiusM)));
+    const url = `https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}%7C${lng}&gsradius=${r}&gslimit=50&format=json&origin=*`;
+    const resp = await fetch(url);
+    if (!resp.ok) return [];
+    const d = (await resp.json()) as { query?: { geosearch?: { title: string; lat: number; lon: number }[] } };
+    return (d.query?.geosearch ?? [])
+      .filter((g) => g.title && g.lat != null && g.lon != null)
+      .slice(0, 30)
+      .map((g) => ({ name: g.title, lat: g.lat, lng: g.lon }));
+  } catch {
+    return [];
+  }
+}
+
 export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => void }) {
   const [mode, setMode] = useState<"create" | "join" | "code">("join");
   const [gameCode, setGameCode] = useState("");
@@ -81,11 +98,15 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
     setBusy(true);
     setErr(null);
     try {
+      // For an AI custom zone, gather the real nearby places here in the browser and send them along.
+      const places = mode === "create" && zone === "custom" && customCenter && customAi
+        ? await wikiPlaces(customCenter.lat, customCenter.lng, customRadius)
+        : [];
       const body =
         mode === "create" ? {
           action: "create", zone, missionsMode, name, consent, profile: profileKey(),
           ...(zone === "custom" && customCenter
-            ? { custom: { name: customName, lat: customCenter.lat, lng: customCenter.lng, radiusM: customRadius, ai: customAi } }
+            ? { custom: { name: customName, lat: customCenter.lat, lng: customCenter.lng, radiusM: customRadius, ai: customAi, ...(places.length ? { places } : {}) } }
             : {}),
         }
         : mode === "join" ? { action: "join", gameCode, name, consent, profile: profileKey() }

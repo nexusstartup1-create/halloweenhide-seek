@@ -461,7 +461,7 @@ async function invalidateDraw(c: Db, gid: number) {
 }
 
 /** A new game in one of the zones. Returns its 5-letter code; the creator joins it as host right after. */
-export async function createGame(zone: string, missionsMode = "chill", custom?: { name: string; lat: number; lng: number; radiusM: number; ai?: boolean }) {
+export async function createGame(zone: string, missionsMode = "chill", custom?: { name: string; lat: number; lng: number; radiusM: number; ai?: boolean; places?: { name: string; lat: number; lng: number }[] }) {
   // Housekeeping: old games and their data go after KEEP_DAYS (see the privacy page).
   await purgeOldGames().catch((e) => console.warn("purge:", e));
   const mode = missionsMode === "abbandonati" ? "abbandonati" : "chill";
@@ -475,7 +475,7 @@ export async function createGame(zone: string, missionsMode = "chill", custom?: 
     // Bespoke AI missions from the real places in the area, falling back to the generic set.
     let missions: Mission[] = GENERIC_MISSIONS;
     if (custom.ai) {
-      const gen = await generateMissions(name, custom.lat, custom.lng, radius);
+      const gen = await generateMissions(name, custom.lat, custom.lng, radius, custom.places);
       if (gen) missions = gen;
     }
     mJson = JSON.stringify(missions);

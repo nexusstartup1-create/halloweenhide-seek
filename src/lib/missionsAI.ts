@@ -154,9 +154,17 @@ const SAFETY = `REGOLE DI SICUREZZA obbligatorie: tutto da spazi pubblici e da f
 /**
  * Returns a bespoke mission set for the zone, or null to fall back to the fixed generic one.
  */
-export async function generateMissions(zoneName: string, lat: number, lng: number, radiusM: number): Promise<Mission[] | null> {
+export async function generateMissions(
+  zoneName: string, lat: number, lng: number, radiusM: number,
+  clientPlaces?: { name: string; lat: number; lng: number }[],
+): Promise<Mission[] | null> {
   try {
-    const pois = await fetchPois(lat, lng, radiusM);
+    // Prefer places gathered by the host's browser (residential IP, no datacenter blocking);
+    // fall back to a server-side fetch only if the client sent nothing usable.
+    const fromClient = (clientPlaces ?? [])
+      .map((p) => ({ name: String(p.name ?? "").slice(0, 80), lat: Number(p.lat), lng: Number(p.lng), kind: "luogo" }))
+      .filter((p) => p.name.length > 1 && Number.isFinite(p.lat) && Number.isFinite(p.lng));
+    const pois = fromClient.length >= 4 ? fromClient : await fetchPois(lat, lng, radiusM);
 
     if (pois.length >= 4) {
       // Place-specific missions pinned to the real spots.
