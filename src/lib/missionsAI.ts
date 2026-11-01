@@ -81,12 +81,16 @@ REGOLE DI SICUREZZA obbligatorie: tutto da spazi pubblici e da fuori; mai entrar
 Rispondi SOLO con un array JSON, senza testo attorno. Ogni elemento:
 {"poi": <numero del luogo dalla lista>, "title": "<titolo breve e d'effetto>", "task": "<istruzioni chiare, 1-2 frasi>", "kind": "PHOTO" | "VIDEO", "points": <intero 300-900>}`;
 
-    const { text } = await generateText({
-      model: process.env.MISSIONS_AI_MODEL || "anthropic/claude-haiku-4.5",
-      prompt,
-      temperature: 0.9,
-      maxOutputTokens: 2500,
-    });
+    // Groq (free, fast) if its key is set; otherwise the Vercel AI Gateway (OIDC in prod).
+    let model: Parameters<typeof generateText>[0]["model"];
+    if (process.env.GROQ_API_KEY) {
+      const { createGroq } = await import("@ai-sdk/groq");
+      const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+      model = groq(process.env.MISSIONS_AI_MODEL || "llama-3.3-70b-versatile");
+    } else {
+      model = process.env.MISSIONS_AI_MODEL || "anthropic/claude-haiku-4.5";
+    }
+    const { text } = await generateText({ model, prompt, temperature: 0.9, maxOutputTokens: 2500 });
 
     const arr = extractJsonArray(text);
     if (!arr) return null;
