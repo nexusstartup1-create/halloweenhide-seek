@@ -43,8 +43,38 @@ async function overpass(query: string): Promise<{ elements?: { tags?: Record<str
   return null;
 }
 
-/** Notable, nameable places inside the play area. Empty if Overpass is unreachable. */
+/** Notable named places from Italian Wikipedia near the point — reliable from servers, real landmarks. */
+async function fetchWikiPlaces(lat: number, lng: number, radiusM: number): Promise<Poi[]> {
+  const r = Math.max(120, Math.min(10_000, Math.round(radiusM)));
+  const url = `https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}%7C${lng}&gsradius=${r}&gslimit=50&format=json&origin=*`;
+  try {
+    const resp = await fetch(url, {
+      headers: { "user-agent": "NightHunt/1.0 (hide-and-seek party game; https://nighthunt.vercel.app)" },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!resp.ok) return [];
+    const d = (await resp.json()) as { query?: { geosearch?: { title: string; lat: number; lon: number }[] } };
+    const out: Poi[] = [];
+    for (const g of d.query?.geosearch ?? []) {
+      const name = g.title?.trim();
+      if (!name || g.lat == null || g.lon == null) continue;
+      out.push({ name, lat: g.lat, lng: g.lon, kind: "luogo" });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Best available set of real places: Wikipedia first (robust), Overpass as a fallback. */
 async function fetchPois(lat: number, lng: number, radiusM: number): Promise<Poi[]> {
+  const wiki = await fetchWikiPlaces(lat, lng, radiusM);
+  if (wiki.length >= 4) return wiki.slice(0, 40);
+  return fetchOverpassPois(lat, lng, radiusM);
+}
+
+/** Notable, nameable places from OpenStreetMap/Overpass (fallback; often rate-limited from servers). */
+async function fetchOverpassPois(lat: number, lng: number, radiusM: number): Promise<Poi[]> {
   const r = Math.max(120, Math.min(3000, Math.round(radiusM)));
   const q = `[out:json][timeout:15];(
     node(around:${r},${lat},${lng})["name"]["tourism"];
