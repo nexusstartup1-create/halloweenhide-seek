@@ -167,6 +167,58 @@ function Standings({ s }: { s: GameState }) {
   );
 }
 
+/** Triggers a plain file download in the browser. */
+function downloadFile(file: File) {
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** Share or save one proof: the viral loop — a clip goes straight to TikTok/Instagram from the phone. */
+function ClipActions({ id, kind, title, toast }: { id: number; kind: "PHOTO" | "VIDEO"; title: string; toast: Toast }) {
+  const [busy, setBusy] = useState(false);
+  const getFile = async () => {
+    const res = await fetch(`/api/media/${id}`, { cache: "no-store" });
+    if (!res.ok) throw new Error("Clip non disponibile.");
+    const blob = await res.blob();
+    const ext = (blob.type.split("/")[1] || (kind === "VIDEO" ? "mp4" : "jpg")).replace("quicktime", "mov").replace("jpeg", "jpg");
+    const safe = title.replace(/[^\p{L}\p{N} ]/gu, "").trim().slice(0, 40) || "clip";
+    return new File([blob], `Night Hunt - ${safe}.${ext}`, { type: blob.type || (kind === "VIDEO" ? "video/mp4" : "image/jpeg") });
+  };
+  const share = async () => {
+    setBusy(true);
+    try {
+      const file = await getFile();
+      const nav = navigator as Navigator & { canShare?: (d: { files: File[] }) => boolean };
+      if (navigator.share && nav.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Night Hunt" });
+      } else {
+        downloadFile(file);
+        toast("Condivisione diretta non supportata: l'ho salvato, caricalo tu su TikTok/Instagram.");
+      }
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async () => {
+    setBusy(true);
+    try { downloadFile(await getFile()); } catch (e) { toast((e as Error).message, true); } finally { setBusy(false); }
+  };
+  return (
+    <div className="row clipactions" style={{ gap: 6, marginTop: 6 }}>
+      <button type="button" className="btn sm" style={{ flex: 1 }} onClick={share} disabled={busy}>↗ Condividi</button>
+      <button type="button" className="btn sm" style={{ flex: 1 }} onClick={save} disabled={busy}>⤓ Salva</button>
+    </div>
+  );
+}
+
 export function Results({ s, refresh, toast }: { s: GameState; refresh: () => void; toast: Toast }) {
   const w = s.game.winner;
   const r = s.results;
@@ -226,14 +278,16 @@ export function Results({ s, refresh, toast }: { s: GameState; refresh: () => vo
       ))}
       {r && <Standings s={s} />}
       {r && <Graveyard fallen={r.fallen} meId={s.me.id} />}
-      <div className="lbl">Album delle prove</div>
+      <div className="lbl">Album &amp; highlights della serata 🎬</div>
       {album == null && <span className="muted small">Carico…</span>}
       {album?.length === 0 && <span className="muted small">Nessuna prova caricata.</span>}
+      {!!album?.length && <span className="muted small">Questi sono i momenti migliori. Condivideteli: Night Hunt vive dei vostri video.</span>}
       <div className="album">
         {album?.map((a) => (
           <figure key={a.id}>
             <ProofMedia id={a.id} kind={a.kind} />
             <figcaption><b>{a.title}</b><span>{a.pair} · {a.player} · +{pts(a.points)}</span></figcaption>
+            <ClipActions id={a.id} kind={a.kind} title={a.title} toast={toast} />
           </figure>
         ))}
       </div>
