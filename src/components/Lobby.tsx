@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import QRCode from "qrcode";
 import { Avatar, AvatarPicker, uploadAvatar } from "./Avatar";
 import { Cobwebs } from "./Cobwebs";
 import { ShaderBackground } from "@/components/ui/ass";
@@ -27,7 +28,11 @@ type ZoneOption = (typeof ZONE_OPTIONS)[number]["key"];
 export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => void }) {
   const [mode, setMode] = useState<"create" | "join" | "code">("join");
   const [gameCode, setGameCode] = useState("");
-  const [zone, setZone] = useState<ZoneOption>("cirenaica");
+  const [zone, setZone] = useState<ZoneOption | "custom">("cirenaica");
+  const [customName, setCustomName] = useState("");
+  const [customCenter, setCustomCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const [customRadius, setCustomRadius] = useState(500);
+  const [geoBusy, setGeoBusy] = useState(false);
   const [missionsMode, setMissionsMode] = useState<"chill" | "abbandonati">("chill");
   const [found, setFound] = useState<{ zoneName: string; players: number; phase: string } | null>(null);
   const [name, setName] = useState("");
@@ -76,7 +81,12 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
     setErr(null);
     try {
       const body =
-        mode === "create" ? { action: "create", zone, missionsMode, name, consent, profile: profileKey() }
+        mode === "create" ? {
+          action: "create", zone, missionsMode, name, consent, profile: profileKey(),
+          ...(zone === "custom" && customCenter
+            ? { custom: { name: customName, lat: customCenter.lat, lng: customCenter.lng, radiusM: customRadius } }
+            : {}),
+        }
         : mode === "join" ? { action: "join", gameCode, name, consent, profile: profileKey() }
         : { action: "rejoin", code };
       await post("/api/lobby", body);
@@ -88,6 +98,16 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
     } finally {
       setBusy(false);
     }
+  };
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) { setErr("Il telefono non espone la posizione."); return; }
+    setGeoBusy(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { setCustomCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setGeoBusy(false); setErr(null); },
+      () => { setGeoBusy(false); setErr("Non riesco a prendere la posizione: concedi il permesso GPS e riprova."); },
+      { enableHighAccuracy: true, timeout: 10_000 },
+    );
   };
 
   const who = (
@@ -173,28 +193,52 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
                     <span>{z.desc}</span>
                   </button>
                 ))}
+                <button type="button" className={`zonecard ${zone === "custom" ? "on" : ""}`} onClick={() => setZone("custom")} aria-pressed={zone === "custom"}>
+                  <b>📍 La mia zona</b>
+                  <span>Gioca ovunque: segna il centro e il raggio della vostra area.</span>
+                </button>
               </div>
             </div>
-            <div className="field">
-              <span className="lbl">Missioni</span>
-              <div className="seg">
-                <button type="button" className={missionsMode === "chill" ? "on" : ""} onClick={() => setMissionsMode("chill")}>Chill</button>
-                <button type="button" className={missionsMode === "abbandonati" ? "on" : ""} onClick={() => setMissionsMode("abbandonati")}>Posti abbandonati</button>
-              </div>
-              <span className="muted small">{missionsMode === "chill" ? "Piazze, parchi e luoghi del quartiere." : "Edifici e luoghi abbandonati del quartiere, più qualche missione classica se sono pochi."}</span>
-              {missionsMode === "abbandonati" && (
-                <label className="consent abandonwarn">
-                  <input type="checkbox" checked={abandonOk} onChange={(e) => setAbandonOk(e.target.checked)} />
-                  <span>
-                    Ho capito: i posti abbandonati possono essere pericolanti, e entrare in un edificio privato o recintato è reato.
-                    Le missioni si fanno da fuori, salvo luoghi aperti a tutti, e ognuno decide per sé.
-                  </span>
+            {zone === "custom" ? (
+              <div className="field">
+                <label className="field">
+                  <span className="lbl">Nome della zona</span>
+                  <input className="input" value={customName} onChange={(e) => setCustomName(e.target.value)} maxLength={40} placeholder="Trastevere, Roma" />
                 </label>
-              )}
-            </div>
+                <button type="button" className="btn" onClick={useMyLocation} disabled={geoBusy}>
+                  {geoBusy ? "Prendo la posizione…" : customCenter ? "Posizione segnata ✓ · aggiorna" : "📍 Usa la mia posizione come centro"}
+                </button>
+                {customCenter && <span className="muted small">Centro: {customCenter.lat.toFixed(5)}, {customCenter.lng.toFixed(5)}</span>}
+                <span className="lbl" style={{ marginTop: 8 }}>Raggio dell&apos;area</span>
+                <div className="seg">
+                  {[300, 500, 800, 1200].map((r) => (
+                    <button type="button" key={r} className={customRadius === r ? "on" : ""} onClick={() => setCustomRadius(r)}>{r >= 1000 ? `${r / 1000} km` : `${r} m`}</button>
+                  ))}
+                </div>
+                <span className="muted small">Le missioni di una zona personalizzata si possono fare ovunque dentro l&apos;area.</span>
+              </div>
+            ) : (
+              <div className="field">
+                <span className="lbl">Missioni</span>
+                <div className="seg">
+                  <button type="button" className={missionsMode === "chill" ? "on" : ""} onClick={() => setMissionsMode("chill")}>Chill</button>
+                  <button type="button" className={missionsMode === "abbandonati" ? "on" : ""} onClick={() => setMissionsMode("abbandonati")}>Posti abbandonati</button>
+                </div>
+                <span className="muted small">{missionsMode === "chill" ? "Piazze, parchi e luoghi del quartiere." : "Edifici e luoghi abbandonati del quartiere, più qualche missione classica se sono pochi."}</span>
+                {missionsMode === "abbandonati" && (
+                  <label className="consent abandonwarn">
+                    <input type="checkbox" checked={abandonOk} onChange={(e) => setAbandonOk(e.target.checked)} />
+                    <span>
+                      Ho capito: i posti abbandonati possono essere pericolanti, e entrare in un edificio privato o recintato è reato.
+                      Le missioni si fanno da fuori, salvo luoghi aperti a tutti, e ognuno decide per sé.
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
             {who}
-            <button type="submit" className="btn a" disabled={busy || !consent || (missionsMode === "abbandonati" && !abandonOk) || name.trim().length < 2}>{busy ? "Creo…" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
-            <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice con il tuo gruppo.</span>
+            <button type="submit" className="btn a" disabled={busy || !consent || (zone !== "custom" && missionsMode === "abbandonati" && !abandonOk) || name.trim().length < 2 || (zone === "custom" && (!customCenter || customName.trim().length < 2))}>{busy ? "Creo…" : zone === "custom" ? "Crea partita qui" : `Crea partita a ${ZONE_OPTIONS.find((z) => z.key === zone)!.name}`}</button>
+            <span className="muted small">Diventi l&apos;organizzatore: poi condividi il codice (o il link) con il tuo gruppo.</span>
           </>
         )}
 
@@ -221,28 +265,50 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
   );
 }
 
-/** Game code with a share button: the link opens the join screen with the code already filled in. */
+/** Game code with share + QR: the link (and the QR) open the join screen with the code already filled in. */
 export function ShareGame({ code, zoneName, toast }: { code: string; zoneName: string; toast: Toast }) {
+  const [qr, setQr] = useState<string | null>(null);
+  const [showQr, setShowQr] = useState(false);
+  const url = () => `${window.location.origin}/?p=${code}`;
   const share = async () => {
-    const url = `${window.location.origin}/?p=${code}`;
     const text = `Night Hunt a ${zoneName}: entra con il codice ${code}`;
     try {
-      if (navigator.share) await navigator.share({ title: "Night Hunt", text, url });
+      if (navigator.share) await navigator.share({ title: "Night Hunt", text, url: url() });
       else {
-        await navigator.clipboard.writeText(`${text} ${url}`);
+        await navigator.clipboard.writeText(`${text} ${url()}`);
         toast("Link copiato: incollalo nel gruppo.");
       }
     } catch {
       // share sheet closed: nothing to do
     }
   };
+  const toggleQr = async () => {
+    if (!showQr && !qr) {
+      try {
+        setQr(await QRCode.toDataURL(url(), { width: 240, margin: 1, color: { dark: "#0b0b12", light: "#ffffff" } }));
+      } catch { toast("Non riesco a generare il QR.", true); return; }
+    }
+    setShowQr((v) => !v);
+  };
   return (
     <div className="box a gamecode">
-      <div>
-        <span className="lbl">Codice partita</span>
-        <span className="code big-code">{code}</span>
+      <div className="gamecode-row">
+        <div>
+          <span className="lbl">Codice partita</span>
+          <span className="code big-code">{code}</span>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button type="button" className="btn sm" onClick={toggleQr} aria-pressed={showQr}>{showQr ? "Nascondi QR" : "QR"}</button>
+          <button type="button" className="btn a sm" onClick={share}>Condividi</button>
+        </div>
       </div>
-      <button type="button" className="btn a sm" onClick={share}>Condividi</button>
+      {showQr && qr && (
+        <div className="qrbox">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={qr} alt="QR per entrare in partita" width={240} height={240} style={{ borderRadius: 12 }} />
+          <span className="muted small">Fai inquadrare questo QR: si entra dritti in partita.</span>
+        </div>
+      )}
     </div>
   );
 }

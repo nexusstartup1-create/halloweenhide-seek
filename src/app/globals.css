@@ -1228,3 +1228,8 @@ label.btn.off { background: var(--fill-2); color: var(--label-2); cursor: not-al
 .dotrole.g { background: #a970ff; }
 .phantom-templates { display: flex; flex-wrap: wrap; gap: 6px; }
 .phantom-templates .chip { font-size: 12px; }
+
+/* Share game: code row + QR for scanning to join */
+.gamecode-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.qrbox { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); text-align: center; }
+.qrbox img { background: #fff; padding: 8px; }
