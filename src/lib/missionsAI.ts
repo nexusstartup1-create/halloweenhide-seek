@@ -86,14 +86,33 @@ function extractJsonArray(text: string): unknown[] | null {
   }
 }
 
-/** The configured model: Groq (free) if its key is set, otherwise the Vercel AI Gateway (OIDC in prod). */
-async function pickModel(): Promise<Parameters<typeof generateText>[0]["model"]> {
-  if (process.env.GROQ_API_KEY) {
+/**
+ * Runs the prompt against the first model that works. With Groq (free) it tries a list,
+ * because Groq rotates model names; otherwise it uses the Vercel AI Gateway (OIDC in prod).
+ * Returns the reply text, or null if every candidate failed.
+ */
+async function runLLM(prompt: string, temperature: number): Promise<string | null> {
+  const key = process.env.GROQ_API_KEY;
+  const env = process.env.MISSIONS_AI_MODEL;
+  let groq: ((id: string) => Parameters<typeof generateText>[0]["model"]) | null = null;
+  let candidates: string[];
+  if (key) {
     const { createGroq } = await import("@ai-sdk/groq");
-    const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
-    return groq(process.env.MISSIONS_AI_MODEL || "llama-3.3-70b-versatile");
+    groq = createGroq({ apiKey: key });
+    candidates = [env, "llama-3.1-8b-instant", "meta-llama/llama-4-maverick-17b-128e-instruct", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"].filter(Boolean) as string[];
+  } else {
+    candidates = [env || "anthropic/claude-haiku-4.5"];
   }
-  return process.env.MISSIONS_AI_MODEL || "anthropic/claude-haiku-4.5";
+  for (const name of candidates) {
+    try {
+      const model = groq ? groq(name) : name;
+      const { text } = await generateText({ model, prompt, temperature, maxOutputTokens: 2500 });
+      if (text?.trim()) return text;
+    } catch (e) {
+      console.warn("LLM model", name, "failed:", (e as Error).message);
+    }
+  }
+  return null;
 }
 
 const SAFETY = `REGOLE DI SICUREZZA obbligatorie: tutto da spazi pubblici e da fuori; mai entrare in proprietà privata o recintata; mai spaventare o disturbare passanti o chi dorme; niente di pericoloso o illegale.`;
@@ -103,7 +122,6 @@ const SAFETY = `REGOLE DI SICUREZZA obbligatorie: tutto da spazi pubblici e da f
  */
 export async function generateMissions(zoneName: string, lat: number, lng: number, radiusM: number): Promise<Mission[] | null> {
   try {
-    const model = await pickModel();
     const pois = await fetchPois(lat, lng, radiusM);
 
     if (pois.length >= 4) {
@@ -121,8 +139,8 @@ ${SAFETY}
 
 Rispondi SOLO con un array JSON, niente testo attorno. Ogni elemento:
 {"poi": <numero del luogo>, "title": "<titolo breve>", "task": "<istruzioni, 1-2 frasi>", "kind": "PHOTO"|"VIDEO", "points": <intero 300-900>}`;
-      const { text } = await generateText({ model, prompt, temperature: 0.9, maxOutputTokens: 2500 });
-      const arr = extractJsonArray(text);
+      const text = await runLLM(prompt, 0.9);
+      const arr = text ? extractJsonArray(text) : null;
       if (!arr) return null;
       const missions: Mission[] = [];
       for (const raw of arr) {
@@ -151,8 +169,8 @@ ${SAFETY}
 
 Rispondi SOLO con un array JSON, niente testo attorno. Ogni elemento:
 {"title": "<titolo breve>", "task": "<istruzioni, 1-2 frasi>", "kind": "PHOTO"|"VIDEO", "points": <intero 300-900>}`;
-    const { text } = await generateText({ model, prompt, temperature: 0.95, maxOutputTokens: 2200 });
-    const arr = extractJsonArray(text);
+    const text = await runLLM(prompt, 0.95);
+    const arr = text ? extractJsonArray(text) : null;
     if (!arr) return null;
     const missions: Mission[] = [];
     for (const raw of arr) {
