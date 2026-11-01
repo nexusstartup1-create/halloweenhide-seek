@@ -257,6 +257,10 @@ alter table flash_slots add column if not exists game_id int not null default 1;
 alter table game add column if not exists live_min int not null default 70;
 alter table game add column if not exists head_start_min int not null default 10;
 alter table game add column if not exists zone_radius_m int not null default 80;
+-- Custom per-game zone (null = use the fixed ZONES preset): lets any group play in any neighbourhood.
+alter table game add column if not exists boundary jsonb;
+alter table game add column if not exists missions jsonb;
+alter table game add column if not exists zone_name text;
 alter table game add column if not exists missions_mode text not null default 'chill';
 alter table game add column if not exists paused_at timestamptz;
 alter table players add column if not exists spectator boolean not null default false;

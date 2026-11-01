@@ -1,5 +1,5 @@
 // Everything about the evening that is fixed in code: there is no admin page.
-type LngLat = [number, number];
+export type LngLat = [number, number];
 
 /** Defaults for a new game; the host can change them in the lobby (options below). */
 export const HEAD_START_MIN = 10;
@@ -544,9 +544,53 @@ export function allMissionsFor(zone: string | null | undefined, mode: string | n
 
 /** Place missions only (flash missions are picked from these). */
 export function missionsFor(zone: string | null | undefined, mode: string | null | undefined) {
-  const all = zoneOf(zone).missions;
+  return missionsFromList(zoneOf(zone).missions, mode);
+}
+
+/** Same as missionsFor/allMissionsFor but on an explicit list, so a custom (per-game) zone can supply its own. */
+export function missionsFromList(all: Mission[], mode: string | null | undefined) {
   const chill = all.filter((m) => !m.abandoned);
   if (mode !== "abbandonati") return chill;
   const abandoned = all.filter((m) => m.abandoned);
   return [...abandoned, ...chill.slice(0, Math.max(0, MIN_ABANDONED_SET - abandoned.length))];
 }
+
+export function allMissionsFromList(all: Mission[], mode: string | null | undefined) {
+  return [...missionsFromList(all, mode), ...SPECIAL_MISSIONS];
+}
+
+/** A circular play-zone boundary from a centre and a radius in metres — lets any group play anywhere. */
+export function circleBoundary(lng: number, lat: number, radiusM: number, points = 28): LngLat[] {
+  const dLat = radiusM / 111_320;
+  const dLng = radiusM / (111_320 * Math.cos((lat * Math.PI) / 180) || 1);
+  const ring: LngLat[] = [];
+  for (let i = 0; i < points; i++) {
+    const a = (i / points) * 2 * Math.PI;
+    ring.push([lng + dLng * Math.cos(a), lat + dLat * Math.sin(a)]);
+  }
+  ring.push(ring[0]);
+  return ring;
+}
+
+/**
+ * Missions that work in ANY neighbourhood (no fixed landmark): the default set for a custom zone,
+ * until better, place-specific ones are generated. All "STREET" = doable anywhere inside the area.
+ */
+export const GENERIC_MISSIONS: Mission[] = [
+  { id: "g-vetrina", special: "STREET", title: "Il riflesso sbagliato", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "PHOTO", points: 500,
+    task: "Foto davanti alla vetrina di un negozio chiuso: nel riflesso uno di voi fa una faccia da posseduto, l'altro finge di non essersene accorto." },
+  { id: "g-panchina", special: "STREET", title: "Seduta con l'invisibile", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "PHOTO", points: 400,
+    task: "Foto su una panchina: lasciate un posto vuoto in mezzo e guardate entrambi \"qualcuno\" che non c'è, terrorizzati." },
+  { id: "g-citofono", special: "STREET", title: "Chi è?", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "VIDEO", points: 600,
+    task: "Video di 15 secondi: uno sussurra a un citofono spento una richiesta sempre più inquietante di farvi entrare. Non suonate a nessuno davvero." },
+  { id: "g-ombra", special: "STREET", title: "La tua ombra non ti segue", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "VIDEO", points: 700, reward: "ECO",
+    task: "Video di 10 secondi sotto un lampione: uno cammina e si ferma di colpo, l'altro recita l'ombra che continua a muoversi da sola." },
+  { id: "g-vicolo", special: "STREET", title: "In fondo al vicolo", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "PHOTO", points: 600,
+    task: "Foto dal fondo del vicolo o della via più buia che trovate: uno è lontano, piccolo, immobile; l'altro scatta come se non dovesse avvicinarsi mai." },
+  { id: "g-finestra", special: "STREET", title: "Qualcuno ti osserva", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "PHOTO", points: 500,
+    task: "Foto verso l'alto, una finestra qualsiasi di un palazzo: raccontate nella caption chi vi guarda da lassù. Niente volti di persone vere alle finestre." },
+  { id: "g-conta", special: "STREET", title: "Uno… due… tre…", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "VIDEO", points: 800, reward: "GHOST_SHIELD",
+    task: "Video di 15 secondi: uno conta a occhi chiusi appoggiato a un muro come in un nascondino maledetto, l'altro sparisce dall'inquadratura un pezzo alla volta." },
+  { id: "g-cartello", special: "STREET", title: "Il segnale dall'aldilà", place: "Ovunque nella zona", lat: 0, lng: 0, radiusM: 0, kind: "PHOTO", points: 400,
+    task: "Foto accanto a un cartello stradale o un'insegna: fate finta che vi stia mandando un messaggio dall'oltretomba e reagite di conseguenza." },
+];

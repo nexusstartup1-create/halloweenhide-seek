@@ -12,6 +12,7 @@ export async function POST(req: Request) {
       action: string; name?: string; role?: string; code?: string; gameCode?: string; zone?: string; playerId?: string;
       liveMin?: number; headStartMin?: number; zoneRadiusM?: number; missionsMode?: string; huntersN?: number; partnerId?: string | null;
       consent?: boolean; profile?: string;
+      custom?: { name?: string; lat?: number; lng?: number; radiusM?: number };
     }>(req);
     // New players must accept the rules and the privacy notice.
     const needConsent = () => {
@@ -23,7 +24,10 @@ export async function POST(req: Request) {
     if (b.action === "create") {
       needConsent();
       checkPlayer(String(b.name ?? "")); // before creating, so no empty games are left behind
-      const gameCode = await createGame(String(b.zone ?? ""), String(b.missionsMode ?? "chill"));
+      const custom = b.custom
+        ? { name: String(b.custom.name ?? ""), lat: Number(b.custom.lat), lng: Number(b.custom.lng), radiusM: Number(b.custom.radiusM) }
+        : undefined;
+      const gameCode = await createGame(String(b.zone ?? ""), String(b.missionsMode ?? "chill"), custom);
       const id = await joinGame(gameCode, String(b.name ?? ""));
       await consented(id);
       await linkProfile(id, b.profile, String(b.name ?? ""));

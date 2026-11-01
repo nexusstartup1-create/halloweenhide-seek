@@ -8,7 +8,8 @@ import {
   BLOOD_MOON_BEFORE_END_MIN, BLOOD_MOON_LEN_MIN, BLOOD_MOON_MULT, BLOOD_MOON_ZONE_FACTOR, GHOST_LINE_COOLDOWN_S, GHOST_LINES, REVEAL_S,
   SHRINK_LAST_MIN, SHRINK_TO, STILL_MIN, STILL_RADIUS_M, TOP_BOUNTY, TREASURE_EVERY_MIN, TREASURE_LEN_MIN, TREASURE_POINTS, TREASURE_RADIUS_M,
   CAPTURE_BOUNTY, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_OPTIONS, HOST_STALE_MIN, LIVE_OPTIONS,
-  allMissionsFor, missionsFor, SPECIAL_MISSIONS, type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
+  SPECIAL_MISSIONS, GENERIC_MISSIONS, missionsFromList, allMissionsFromList, circleBoundary, type Mission, type LngLat,
+  type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
 import { bearing, compass, distanceM, inPolygon, neighbours, scaleRing, sectorOf, sectorPolygons } from "./geo";
@@ -37,6 +38,10 @@ export interface GameRow {
   zone_radius_m: number;
   missions_mode: "chill" | "abbandonati";
   paused_at: Date | null;
+  /** Custom per-game zone (null = use the fixed ZONES[zone] preset). Set for games created anywhere. */
+  boundary: LngLat[] | null;
+  missions: Mission[] | null;
+  zone_name: string | null;
 }
 
 export interface PlayerRow {
@@ -130,8 +135,19 @@ export function shrinkWindow(g: GameRow) {
 }
 
 /** The boundary as it is right now: full size, then shrinking towards the centre in the last minutes. */
+/** The effective zone of a game: its own custom one if set, otherwise the fixed ZONES preset. */
+export function gameBoundary(g: GameRow): LngLat[] {
+  return g.boundary ?? gameBoundary(g);
+}
+export function gameMissions(g: GameRow): Mission[] {
+  return g.missions ?? gameMissions(g);
+}
+export function gameZoneName(g: GameRow): string {
+  return g.zone_name ?? zoneOf(g.zone).name;
+}
+
 export function boundaryNow(g: GameRow, now = Date.now()) {
-  const base = zoneOf(g.zone).boundary;
+  const base = gameBoundary(g);
   const w = shrinkWindow(g);
   const phase = phaseOf(g, now);
   if (!w || (phase !== "LIVE" && phase !== "PAUSED")) return base;
@@ -151,7 +167,7 @@ export function treasureNow(g: GameRow, now = Date.now()) {
   if (now - from >= TREASURE_LEN_MIN * 60_000) return null;
   // Only public places that are still inside the (shrinking) zone when it appears.
   const area = boundaryNow(g, from);
-  const spots = zoneOf(g.zone).missions.filter((m) => !m.abandoned && inPolygon(m.lng, m.lat, area));
+  const spots = gameMissions(g).filter((m) => !m.abandoned && inPolygon(m.lng, m.lat, area));
   if (!spots.length) return null;
   const h = (g.id * 7919 + g.round * 104729 + slot * 15485863) >>> 0;
   const spot = spots[h % spots.length];
@@ -444,14 +460,29 @@ async function invalidateDraw(c: Db, gid: number) {
 }
 
 /** A new game in one of the zones. Returns its 5-letter code; the creator joins it as host right after. */
-export async function createGame(zone: string, missionsMode = "chill") {
+export async function createGame(zone: string, missionsMode = "chill", custom?: { name: string; lat: number; lng: number; radiusM: number }) {
   // Housekeeping: old games and their data go after KEEP_DAYS (see the privacy page).
   await purgeOldGames().catch((e) => console.warn("purge:", e));
-  if (!(zone in ZONES)) throw new GameError("Scegli una zona di gioco.");
   const mode = missionsMode === "abbandonati" ? "abbandonati" : "chill";
+  // Custom zone: any group, anywhere. A circle around the chosen centre + missions that work everywhere.
+  let bJson: string | null = null, mJson: string | null = null, zName: string | null = null, zKey = zone;
+  if (custom) {
+    const name = custom.name.trim().slice(0, 40) || "Zona personalizzata";
+    if (![custom.lat, custom.lng, custom.radiusM].every(Number.isFinite)) throw new GameError("Segna il centro della zona sulla mappa.");
+    const radius = Math.max(120, Math.min(3000, Math.round(custom.radiusM)));
+    bJson = JSON.stringify(circleBoundary(custom.lng, custom.lat, radius));
+    mJson = JSON.stringify(GENERIC_MISSIONS);
+    zName = name;
+    zKey = "cirenaica"; // placeholder: the zone column is not-null but is overridden by boundary/missions/zone_name
+  } else if (!(zone in ZONES)) {
+    throw new GameError("Scegli una zona di gioco.");
+  }
   for (let i = 0; i < 20; i++) {
     const c5 = code(5);
-    const r = await q<{ id: number }>("insert into game (code, zone, missions_mode) values ($1, $2, $3) on conflict (code) do nothing returning id", [c5, zone, mode]);
+    const r = await q<{ id: number }>(
+      "insert into game (code, zone, missions_mode, boundary, missions, zone_name) values ($1, $2, $3, $4, $5, $6) on conflict (code) do nothing returning id",
+      [c5, zKey, mode, bJson, mJson, zName],
+    );
     if (r.length) return c5;
   }
   throw new GameError("Non sono riuscito a creare la partita. Riprova.");
@@ -929,7 +960,7 @@ async function grantReward(c: Db, me: PlayerRow, reward: MissionReward) {
 export async function playCard(player: PlayerRow, cardId: number, target: string | null) {
   const gid = player.game_id;
   const g = await getGame(null, gid);
-  const BOUNDARY = zoneOf(g.zone).boundary;
+  const BOUNDARY = gameBoundary(g);
   if (player.spectator) throw new GameError("Sei spettatore: giochi dalla prossima partita.");
   if (phaseOf(g) !== "LIVE") throw new GameError("Le carte si giocano solo a caccia aperta.");
 
@@ -1074,7 +1105,7 @@ export async function hunterZones(g: GameRow): Promise<Zone[]> {
   }));
   // Eco decoys: a fake zone somewhere in the chosen sector, moving once a minute like the real ones.
   const decoys = await q<{ id: number; target: string }>(ECO_DECOYS, [g.id]);
-  const sectors = sectorPolygons(zoneOf(g.zone).boundary);
+  const sectors = sectorPolygons(gameBoundary(g));
   const bucket = Math.floor(Date.now() / (ZONE_REFRESH_S * 1000));
   for (const d of decoys) {
     const sec = sectors.find((x) => x.id === d.target);
@@ -1097,7 +1128,7 @@ export function flashNow(g: GameRow, now = Date.now()) {
   const every = FLASH_EVERY_MIN * 60_000;
   const slot = Math.floor(elapsed / every);
   if (elapsed - slot * every >= FLASH_LEN_MIN * 60_000) return null;
-  const missions = missionsFor(g.zone, g.missions_mode);
+  const missions = missionsFromList(gameMissions(g), g.missions_mode);
   const h = (g.round * 7919 + slot * 104729 + g.id * 31) % missions.length;
   return { slot, mission: missions[h], until: new Date(+g.live_at + slot * every + FLASH_LEN_MIN * 60_000) };
 }
@@ -1126,7 +1157,7 @@ export async function checkMissionUpload(me: PlayerRow, missionId: string, lat: 
   const phase = phaseOf(g);
   if (phase !== "LIVE" && phase !== "HEAD_START") throw new GameError("Le missioni sono aperte solo durante la partita.");
   if (me.role !== "FUGITIVE" || me.status !== "ACTIVE" || !me.pair_id || me.spectator) throw new GameError("Solo i fuggiaschi in gioco fanno le missioni.");
-  const m = allMissionsFor(g.zone, g.missions_mode).find((x) => x.id === missionId);
+  const m = allMissionsFromList(gameMissions(g), g.missions_mode).find((x) => x.id === missionId);
   if (!m) throw new GameError("Missione non trovata.");
   if (![lat, lng].every(Number.isFinite)) throw new GameError("Serve la posizione GPS.");
   if (m.special === "AMBUSH") {
@@ -1143,7 +1174,7 @@ export async function checkMissionUpload(me: PlayerRow, missionId: string, lat: 
       );
     }
   } else if (m.special === "STREET") {
-    if (!inPolygon(lng, lat, zoneOf(g.zone).boundary)) throw new GameError("Questa missione si fa dentro la zona di gioco.");
+    if (!inPolygon(lng, lat, gameBoundary(g))) throw new GameError("Questa missione si fa dentro la zona di gioco.");
   } else {
     const d = distanceM(lat, lng, m.lat, m.lng);
     if (!Number.isFinite(d) || d > m.radiusM + Math.min(acc || 0, 25)) {
@@ -1214,7 +1245,7 @@ export async function album(me: PlayerRow) {
       where pr.game_id = $1 order by pr.id`,
     [g.id],
   );
-  const missions = [...zoneOf(g.zone).missions, ...SPECIAL_MISSIONS];
+  const missions = [...gameMissions(g), ...SPECIAL_MISSIONS];
   return list.map((p) => ({ ...p, title: missions.find((m) => m.id === p.mission_id)?.title ?? p.mission_id }));
 }
 
@@ -1258,7 +1289,7 @@ export async function replayOf(me: PlayerRow) {
     start: +g.started_at,
     live: g.live_at ? +g.live_at : null,
     end: +(g.ended_at ?? g.ends_at ?? new Date()),
-    boundary: zoneOf(g.zone).boundary,
+    boundary: gameBoundary(g),
     players: players.filter((p) => tracks[p.id]).map((p) => ({ id: p.id, name: p.name, role: p.role, pairId: p.pair_id, pair: p.pair })),
     tracks,
     captures: caps.map((c) => ({ victim: c.victim, hunter: c.hunter, t: Number(c.t) })),
@@ -1491,7 +1522,7 @@ async function liveEvents(g: GameRow) {
     [g.id, g.live_at, STILL_MIN],
   );
   if (!still.length) return;
-  const BOUNDARY = zoneOf(g.zone).boundary;
+  const BOUNDARY = gameBoundary(g);
   await tx(async (c) => {
     for (const f of still) {
       await c.query("insert into reveals (game_id, player_id, lat, lng, until) values ($1, $2, $3, $4, now() + make_interval(secs => $5::int))", [g.id, f.id, f.lat, f.lng, REVEAL_S]);
@@ -1830,8 +1861,7 @@ async function fallenOf(g: GameRow) {
 
 export async function playerState(me: PlayerRow, afterMsg: number) {
   let g = await getGame(null, me.game_id);
-  const zone = zoneOf(g.zone);
-  const BOUNDARY = zone.boundary;
+  const BOUNDARY = gameBoundary(g);
   g = await ensureFinalized(g);
   const now = Date.now();
   const phase = phaseOf(g, now);
@@ -1898,7 +1928,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     game: {
       code: g.code,
       zone: g.zone,
-      zoneName: zone.name,
+      zoneName: gameZoneName(g),
       round: g.round,
       phase,
       drawn: !!g.drawn_at,
@@ -2059,7 +2089,7 @@ export async function playerState(me: PlayerRow, afterMsg: number) {
     const pair = pairs.find((p) => p.id === me.pair_id)!;
     const [partner] = await q<PlayerRow>("select * from players where pair_id = $1 and id <> $2", [me.pair_id, me.id]);
     const proofs = await q<{ id: number; mission_id: string }>("select id::int as id, mission_id from proofs where pair_id = $1", [me.pair_id]);
-    const missions = allMissionsFor(g.zone, g.missions_mode).map((m) => ({
+    const missions = allMissionsFromList(gameMissions(g), g.missions_mode).map((m) => ({
       ...m,
       proofId: proofs.find((p) => p.mission_id === m.id)?.id ?? null,
       flashUntil: flash?.mission.id === m.id ? flash.until : null,
