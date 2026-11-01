@@ -215,7 +215,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
                     <span>{z.desc}</span>
                   </button>
                 ))}
-                <button type="button" className={`zonecard ${zone === "custom" ? "on" : ""}`} onClick={() => setZone("custom")} aria-pressed={zone === "custom"}>
+                <button type="button" className={`zonecard custom ${zone === "custom" ? "on" : ""}`} onClick={() => setZone("custom")} aria-pressed={zone === "custom"}>
                   <b>📍 La mia zona</b>
                   <span>Gioca ovunque: segna il centro e il raggio della vostra area.</span>
                 </button>
