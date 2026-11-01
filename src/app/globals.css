@@ -1234,3 +1234,8 @@ label.btn.off { background: var(--fill-2); color: var(--label-2); cursor: not-al
 .gamecode-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
 .qrbox { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); text-align: center; }
 .qrbox img { background: #fff; padding: 8px; }
+
+/* Custom-zone preview map */
+.zonemap-wrap { position: relative; margin-top: 8px; border-radius: var(--r-md); overflow: hidden; box-shadow: inset 0 0 0 1px var(--sep); }
+.zonemap { height: 190px; width: 100%; background: var(--bg-elev-2); }
+.zonemap-hint { position: absolute; left: 10px; bottom: 10px; z-index: 1; background: rgba(11, 10, 15, 0.72); color: var(--label-2); font-size: 11px; padding: 4px 9px; border-radius: 999px; pointer-events: none; backdrop-filter: blur(6px); }

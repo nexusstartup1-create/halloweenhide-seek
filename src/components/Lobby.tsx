@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
+import { ZonePreview } from "./ZonePreview";
 import { Avatar, AvatarPicker, uploadAvatar } from "./Avatar";
 import { Cobwebs } from "./Cobwebs";
 import { ShaderBackground } from "@/components/ui/ass";
@@ -231,6 +232,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
                   {geoBusy ? "Prendo la posizione…" : customCenter ? "Posizione segnata ✓ · aggiorna" : "📍 Usa la mia posizione come centro"}
                 </button>
                 {customCenter && <span className="muted small">Centro: {customCenter.lat.toFixed(5)}, {customCenter.lng.toFixed(5)}</span>}
+                <ZonePreview center={customCenter} radiusM={customRadius} onPick={(lat, lng) => setCustomCenter({ lat, lng })} />
                 <span className="lbl" style={{ marginTop: 8 }}>Raggio dell&apos;area</span>
                 <div className="seg">
                   {[300, 500, 800, 1200].map((r) => (
