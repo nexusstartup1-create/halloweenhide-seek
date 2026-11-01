@@ -52,7 +52,7 @@ async function fetchWikiPlaces(lat: number, lng: number, radiusM: number): Promi
       headers: { "user-agent": "NightHunt/1.0 (hide-and-seek party game; https://nighthunt.vercel.app)" },
       signal: AbortSignal.timeout(12_000),
     });
-    if (!resp.ok) return [];
+    if (!resp.ok) { console.warn("wiki geosearch status", resp.status); return []; }
     const d = (await resp.json()) as { query?: { geosearch?: { title: string; lat: number; lon: number }[] } };
     const out: Poi[] = [];
     for (const g of d.query?.geosearch ?? []) {
@@ -61,7 +61,8 @@ async function fetchWikiPlaces(lat: number, lng: number, radiusM: number): Promi
       out.push({ name, lat: g.lat, lng: g.lon, kind: "luogo" });
     }
     return out;
-  } catch {
+  } catch (e) {
+    console.warn("wiki geosearch err", (e as Error).message);
     return [];
   }
 }
@@ -69,8 +70,11 @@ async function fetchWikiPlaces(lat: number, lng: number, radiusM: number): Promi
 /** Best available set of real places: Wikipedia first (robust), Overpass as a fallback. */
 async function fetchPois(lat: number, lng: number, radiusM: number): Promise<Poi[]> {
   const wiki = await fetchWikiPlaces(lat, lng, radiusM);
+  console.log("POI wiki=", wiki.length);
   if (wiki.length >= 4) return wiki.slice(0, 40);
-  return fetchOverpassPois(lat, lng, radiusM);
+  const ov = await fetchOverpassPois(lat, lng, radiusM);
+  console.log("POI overpass=", ov.length);
+  return ov;
 }
 
 /** Notable, nameable places from OpenStreetMap/Overpass (fallback; often rate-limited from servers). */
