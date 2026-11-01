@@ -32,6 +32,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
   const [customName, setCustomName] = useState("");
   const [customCenter, setCustomCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [customRadius, setCustomRadius] = useState(500);
+  const [customAi, setCustomAi] = useState(true);
   const [geoBusy, setGeoBusy] = useState(false);
   const [missionsMode, setMissionsMode] = useState<"chill" | "abbandonati">("chill");
   const [found, setFound] = useState<{ zoneName: string; players: number; phase: string } | null>(null);
@@ -84,7 +85,7 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
         mode === "create" ? {
           action: "create", zone, missionsMode, name, consent, profile: profileKey(),
           ...(zone === "custom" && customCenter
-            ? { custom: { name: customName, lat: customCenter.lat, lng: customCenter.lng, radiusM: customRadius } }
+            ? { custom: { name: customName, lat: customCenter.lat, lng: customCenter.lng, radiusM: customRadius, ai: customAi } }
             : {}),
         }
         : mode === "join" ? { action: "join", gameCode, name, consent, profile: profileKey() }
@@ -215,6 +216,10 @@ export function Join({ onDone, onGuide }: { onDone: () => void; onGuide?: () => 
                     <button type="button" key={r} className={customRadius === r ? "on" : ""} onClick={() => setCustomRadius(r)}>{r >= 1000 ? `${r / 1000} km` : `${r} m`}</button>
                   ))}
                 </div>
+                <label className="consent" style={{ marginTop: 10 }}>
+                  <input type="checkbox" checked={customAi} onChange={(e) => setCustomAi(e.target.checked)} />
+                  <span>Genera missioni su misura con l&apos;AI dai luoghi reali della zona (richiede qualche secondo in più). Se non riesce, usa missioni generiche.</span>
+                </label>
                 <span className="muted small">Le missioni di una zona personalizzata si possono fare ovunque dentro l&apos;area.</span>
               </div>
             ) : (

@@ -12,6 +12,7 @@ import {
   type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
+import { generateMissions } from "./missionsAI";
 import { bearing, compass, distanceM, inPolygon, neighbours, scaleRing, sectorOf, sectorPolygons } from "./geo";
 
 export type Phase = "LOBBY" | "HEAD_START" | "LIVE" | "PAUSED" | "ENDED";
@@ -460,7 +461,7 @@ async function invalidateDraw(c: Db, gid: number) {
 }
 
 /** A new game in one of the zones. Returns its 5-letter code; the creator joins it as host right after. */
-export async function createGame(zone: string, missionsMode = "chill", custom?: { name: string; lat: number; lng: number; radiusM: number }) {
+export async function createGame(zone: string, missionsMode = "chill", custom?: { name: string; lat: number; lng: number; radiusM: number; ai?: boolean }) {
   // Housekeeping: old games and their data go after KEEP_DAYS (see the privacy page).
   await purgeOldGames().catch((e) => console.warn("purge:", e));
   const mode = missionsMode === "abbandonati" ? "abbandonati" : "chill";
@@ -471,7 +472,13 @@ export async function createGame(zone: string, missionsMode = "chill", custom?: 
     if (![custom.lat, custom.lng, custom.radiusM].every(Number.isFinite)) throw new GameError("Segna il centro della zona sulla mappa.");
     const radius = Math.max(120, Math.min(3000, Math.round(custom.radiusM)));
     bJson = JSON.stringify(circleBoundary(custom.lng, custom.lat, radius));
-    mJson = JSON.stringify(GENERIC_MISSIONS);
+    // Bespoke AI missions from the real places in the area, falling back to the generic set.
+    let missions: Mission[] = GENERIC_MISSIONS;
+    if (custom.ai) {
+      const gen = await generateMissions(name, custom.lat, custom.lng, radius);
+      if (gen) missions = gen;
+    }
+    mJson = JSON.stringify(missions);
     zName = name;
     zKey = "cirenaica"; // placeholder: the zone column is not-null but is overridden by boundary/missions/zone_name
   } else if (!(zone in ZONES)) {
