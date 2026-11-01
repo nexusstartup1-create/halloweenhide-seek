@@ -8,7 +8,7 @@ import {
   BLOOD_MOON_BEFORE_END_MIN, BLOOD_MOON_LEN_MIN, BLOOD_MOON_MULT, BLOOD_MOON_ZONE_FACTOR, GHOST_LINE_COOLDOWN_S, GHOST_LINES, REVEAL_S,
   SHRINK_LAST_MIN, SHRINK_TO, STILL_MIN, STILL_RADIUS_M, TOP_BOUNTY, TREASURE_EVERY_MIN, TREASURE_LEN_MIN, TREASURE_POINTS, TREASURE_RADIUS_M,
   CAPTURE_BOUNTY, ZONE_REFRESH_S, FLASH_EVERY_MIN, FLASH_LEN_MIN, FLASH_MULT, HEAD_START_OPTIONS, HOST_STALE_MIN, LIVE_OPTIONS,
-  allMissionsFor, missionsFor, SPECIAL_MISSIONS, type MissionReward, FIXED_COUPLE, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
+  allMissionsFor, missionsFor, SPECIAL_MISSIONS, type MissionReward, PAIR_NAMES, PASSWORD_WORDS, SOLO_NAME, RADIUS_OPTIONS, SEED_POOL, WHATSAPP_URL, ZONES, zoneOf, type ZoneKey,
 } from "./config";
 import { notify } from "./push";
 import { bearing, compass, distanceM, inPolygon, neighbours, scaleRing, sectorOf, sectorPolygons } from "./geo";
@@ -78,15 +78,6 @@ const STARTING_HAND: Record<Role, { code: CardCode; uses: number | null }[]> = {
 
 export function normalize(s: string) {
   return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-/** Same normalization join uses for name_key: trim, collapse spaces, lowercase. */
-const coupleKey = (name: string) => name.trim().replace(/\s+/g, " ").toLowerCase();
-
-/** The two FIXED_COUPLE players found in this roster (either slot may be missing). */
-function fixedCoupleIn<T extends { name: string }>(players: T[]): [T | undefined, T | undefined] {
-  const find = (aliases: string[]) => players.find((p) => aliases.includes(coupleKey(p.name)));
-  return [find(FIXED_COUPLE[0]), find(FIXED_COUPLE[1])];
 }
 
 function shuffle<T>(arr: T[]) {
@@ -523,20 +514,12 @@ export async function drawRoles(me: PlayerRow) {
   await tx(async (c) => {
     const g = await requireLobby(c, gid);
     await requireHost(c, me);
-    const ps = (await c.query<PlayerRow>("select * from players where game_id = $1 and not spectator for update", [gid])).rows;
+    const ps = (await c.query<PlayerRow>("select * from players where game_id = $1 and not spectator and not hidden for update", [gid])).rows;
     if (ps.length < 3) throw new GameError("Servono almeno 3 giocatori: 1 cercatore e 2 fuggiaschi.");
     const n = huntersFor(ps.length, g.hunters_n);
-    // The fixed couple is never drawn as hunters: pick hunters only from the others.
-    const couple = fixedCoupleIn(ps);
-    const coupleIds = new Set(couple.filter(Boolean).map((p) => p!.id));
-    const hunters = shuffle(ps.filter((p) => !coupleIds.has(p.id))).slice(0, n);
-    await c.query("update players set role = 'FUGITIVE', partner_pick = null, pair_id = null, password = null where game_id = $1 and not spectator", [gid]);
+    const hunters = shuffle(ps).slice(0, n);
+    await c.query("update players set role = 'FUGITIVE', partner_pick = null, pair_id = null, password = null where game_id = $1 and not spectator and not hidden", [gid]);
     await c.query("update players set role = 'HUNTER' where id = any($1)", [hunters.map((h) => h.id)]);
-    // Lock the fixed couple to each other (shown as a chosen pair; drawPairs enforces it anyway).
-    if (couple[0] && couple[1]) {
-      await c.query("update players set partner_pick = $2 where id = $1", [couple[0].id, couple[1].id]);
-      await c.query("update players set partner_pick = $2 where id = $1", [couple[1].id, couple[0].id]);
-    }
     await c.query("delete from pairs where game_id = $1", [gid]);
     await c.query("update game set roles_at = now(), drawn_at = null where id = $1", [gid]);
     // Who's hunting stays a secret here: everyone turns over their own card in the lobby.
@@ -662,12 +645,6 @@ export async function drawPairs(me: PlayerRow) {
     const byId = new Map(fugitives.map((f) => [f.id, f]));
     const chosen: PlayerRow[] = [];
     const taken = new Set<string>();
-    // The fixed couple is paired first, whatever anyone picked.
-    const couple = fixedCoupleIn(fugitives);
-    if (couple[0] && couple[1]) {
-      chosen.push(couple[0], couple[1]);
-      taken.add(couple[0].id).add(couple[1].id);
-    }
     for (const f of fugitives) {
       const other = f.partner_pick ? byId.get(f.partner_pick) : undefined;
       if (other && other.partner_pick === f.id && !taken.has(f.id) && !taken.has(other.id)) {
