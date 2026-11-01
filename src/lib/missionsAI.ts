@@ -99,7 +99,7 @@ async function runLLM(prompt: string, temperature: number): Promise<string | nul
   if (key) {
     const { createGroq } = await import("@ai-sdk/groq");
     groq = createGroq({ apiKey: key });
-    candidates = [env, "llama-3.1-8b-instant", "meta-llama/llama-4-maverick-17b-128e-instruct", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"].filter(Boolean) as string[];
+    candidates = [env, "openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.1-8b-instant", "meta-llama/llama-4-maverick-17b-128e-instruct", "llama-3.3-70b-versatile"].filter(Boolean) as string[];
   } else {
     candidates = [env || "anthropic/claude-haiku-4.5"];
   }
