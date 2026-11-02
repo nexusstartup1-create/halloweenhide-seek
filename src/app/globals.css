@@ -1254,3 +1254,13 @@ label.btn.off { background: var(--fill-2); color: var(--label-2); cursor: not-al
   .big-code { font-size: 26px; letter-spacing: 0.12em; }
   .zonemap { height: 160px; }
 }
+
+/* --- Large screens: iPhone Duo (unfolded), iPads, desktop --- */
+@media (min-width: 760px) {
+  /* Use the big screen: the shell (and its map) grow wide instead of a 540px strip. */
+  .shell { max-width: min(95vw, 1180px); }
+  /* HUD pills stay a comfortable, centred width instead of stretching across the whole screen. */
+  .topbar, .nav, .banners { left: 50%; right: auto; transform: translateX(-50%); width: min(100% - 24px, 620px); }
+  /* Text tabs (chat, missions, lobby, results…) keep a readable column; the map (.flush) stays full-bleed. */
+  .main:not(.flush) > * { width: 100%; max-width: 660px; margin-inline: auto; }
+}
