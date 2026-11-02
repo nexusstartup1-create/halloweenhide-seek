@@ -135,13 +135,12 @@ export function shrinkWindow(g: GameRow) {
   return { from: Math.max(+g.live_at, +g.ends_at - SHRINK_LAST_MIN * 60_000), to: +g.ends_at };
 }
 
-/** The boundary as it is right now: full size, then shrinking towards the centre in the last minutes. */
 /** The effective zone of a game: its own custom one if set, otherwise the fixed ZONES preset. */
 export function gameBoundary(g: GameRow): LngLat[] {
-  return g.boundary ?? gameBoundary(g);
+  return g.boundary ?? zoneOf(g.zone).boundary;
 }
 export function gameMissions(g: GameRow): Mission[] {
-  return g.missions ?? gameMissions(g);
+  return g.missions ?? zoneOf(g.zone).missions;
 }
 export function gameZoneName(g: GameRow): string {
   return g.zone_name ?? zoneOf(g.zone).name;
